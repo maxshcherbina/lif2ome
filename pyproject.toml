@@ -1,0 +1,30 @@
+[project]
+name = "lif2ome"
+version = "0.1.0"
+description = "Convert Leica .lif files to OME-TIFF files"
+readme = "README.md"
+authors = [
+    { name = "MaxShcherbina", email = "17325179+maxshcherbina@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "liffile>=2026.10.14",
+    "numpy",
+    "tifffile",
+]
+
+[project.optional-dependencies]
+## .czi files: no test with a real file
+czi = ["bioio", "bioio-czi"]
+
+[project.scripts]
+lif2ome = "lif2ome.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.11,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
