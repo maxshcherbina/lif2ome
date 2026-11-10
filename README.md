@@ -200,7 +200,7 @@ lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one serie
 - Tile scans are skipped unless you pass `--tiles`, and `--tiles` writes the tiles separately without stitching them.
   LAS X usually saves the merged image as another series in the same file.
 - A cross-section (XZ scan) is stored with its depth axis as Y, because a plane of an OME-TIFF is always Y by X.
-  The Y pixel size in the file is then the depth step. Cross-section support is experimental.
+  The Y pixel size in the file is then the depth step.
 - A whole series is held in memory, plus a second copy for the pixel check.
 - `.czi` support is experimental. It needs the `lif2ome[czi]` extra, which uses bioio.
 
