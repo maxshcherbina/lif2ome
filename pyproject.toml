@@ -3,6 +3,8 @@ name = "lif2ome"
 version = "0.1.0"
 description = "Convert Leica .lif files to OME-TIFF files"
 readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [
     { name = "MaxShcherbina", email = "17325179+maxshcherbina@users.noreply.github.com" }
 ]
