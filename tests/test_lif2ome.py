@@ -15,6 +15,15 @@ def stack(shape=(2, 3, 8, 8), dtype=np.uint16):
     return np.arange(np.prod(shape), dtype=dtype).reshape(shape)
 
 
+def test_status_line_fits_terminal_width():
+    from lif2ome.cli import _status_line
+
+    text = "  working   C             3.88 GB, reading and merging 224 tiles (step 1 of 3)"
+    assert _status_line(text, 80) == (text + " ...")[:79]
+    assert len(_status_line(text, 80)) == 79
+    assert _status_line("  working   C", 80) == "  working   C ..."
+
+
 def test_write_ome_keeps_pixels_names_and_sizes(tmp_path):
     data, f = stack(), tmp_path / "x.ome.tif"
     lif2ome.write_ome(f, data, "CZYX", ["DAPI", "Green"], pixel_size=0.5, z_step=2.0)

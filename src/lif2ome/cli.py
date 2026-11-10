@@ -1,5 +1,6 @@
 """The lif2ome command."""
 import argparse
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -48,6 +49,10 @@ def _expand(paths):
     return list(unique.values())
 
 
+def _status_line(text, width):
+    return (text + " ...")[:max(0, width - 1)]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="lif2ome", description="Convert every series of Leica .lif files to "
                                      "OME-TIFF files, in a folder named after each .lif file, beside it.")
@@ -79,7 +84,7 @@ def main(argv=None):
     ## in a terminal, one line shows the step in work on the series and the result line then takes its place
     live = sys.stdout.isatty()
     clear = "\r\x1b[K" if live else ""
-    status = (lambda text: print(clear + text + " ...", end="", flush=True)) if live else (lambda text: None)
+    status = (lambda text: print(clear + _status_line(text, shutil.get_terminal_size().columns), end="", flush=True)) if live else (lambda text: None)
     total, problems, folders, start = {}, [], [], time.time()
 
     def report(line):
