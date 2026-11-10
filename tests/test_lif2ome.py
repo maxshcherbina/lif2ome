@@ -278,3 +278,29 @@ def test_time_step_and_y_size_are_written(tmp_path):
     g = tmp_path / "stack.ome.tif"
     lif2ome.write_ome(g, stack(), "CZYX", pixel_size=0.5, time_step=30.5)
     assert "TimeIncrement" not in tifffile.TiffFile(g).ome_metadata   ## no T axis: no time
+
+
+def test_folder(fake, tmp_path, capsys):
+    root = tmp_path / "share"
+    for name in ("b.lif", "sub/a.LIF", "sub/._a.lif", "@Recycle/old.lif", "sub/notes.txt"):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).touch()
+    assert lif2ome.main([str(root), "--only", "Both"]) == 0
+    out = capsys.readouterr().out
+    made = sorted(f.relative_to(root).as_posix() for f in root.rglob("*.ome.tif"))
+    assert made == ["b/b - Both.ome.tif", "sub/a/a - Both.ome.tif"]
+    assert out.index("\nsub/a.LIF\n") > out.index("b.lif\n") and "old.lif" not in out and "._a" not in out
+
+    assert lif2ome.main([str(root)]) == 0   ## all series: the fake file has two that are skipped
+    assert "sub/a.LIF: [3/5] XZ: SKIPPED" in capsys.readouterr().out
+
+    lif2ome.main([str(root), "--only", "Both", "--out", str(tmp_path / "o")])
+    assert sorted(f.relative_to(tmp_path / "o").as_posix() for f in (tmp_path / "o").rglob("*.tif")) == [
+        "b - Both.ome.tif", "sub/a - Both.ome.tif"]
+
+
+def test_empty_folder_is_not_a_failure(tmp_path, capsys):
+    (tmp_path / "quiet" / "@Recycle").mkdir(parents=True)
+    (tmp_path / "quiet" / "@Recycle" / "old.lif").touch()
+    assert lif2ome.main([str(tmp_path / "quiet")]) == 0
+    assert "no .lif files in this folder" in capsys.readouterr().out

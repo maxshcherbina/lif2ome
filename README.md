@@ -33,7 +33,14 @@ uv add git+https://github.com/maxshcherbina/lif2ome
 lif2ome "/path/to/My experiment.lif"
 ```
 
-You can pass several files. While a series is being converted, a status line shows which step it is on:
+You can pass several files, or a folder. A folder stands for every `.lif` in it and in its subfolders; names that
+start with `.` or `@` are left out. An empty folder is not an error.
+
+```bash
+lif2ome /path/to/folder
+```
+
+While a series is being converted, a status line shows which step it is on:
 
 ```
   [2/12] Series002: 0.48 GB, writing (step 2 of 3) ...
@@ -149,6 +156,12 @@ Run it:
 
 ```bash
 docker run --rm -v "/path/to/folder":/data lif2ome "My experiment.lif"
+```
+
+The container only sees the mounted folder, as `/data`. To convert every `.lif` in it, pass `.`:
+
+```bash
+docker run --rm -v "/path/to/folder":/data lif2ome .
 ```
 
 With Apple's `container` tool on a Mac, build with `container build -t lif2ome .` and run:
