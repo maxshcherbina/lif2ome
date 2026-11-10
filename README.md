@@ -20,13 +20,13 @@ format, but no test has opened a `lif2ome` file in them yet.
 You need [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv tool install ~/dev/lif2ome
+uv tool install git+https://github.com/maxshcherbina/lif2ome
 ```
 
 In a project of your own, add it as a library:
 
 ```bash
-uv add ~/dev/lif2ome
+uv add git+https://github.com/maxshcherbina/lif2ome
 ```
 
 ## The command
