@@ -10,7 +10,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "liffile>=2026.10.14",
+    "liffile>=2026.11.8",
     "numpy",
     "tifffile",
 ]

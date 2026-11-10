@@ -1,6 +1,5 @@
 """The lif2ome command."""
 import argparse
-import re
 import sys
 import time
 from pathlib import Path
@@ -43,7 +42,10 @@ def _expand(paths):
         if not lifs:
             print(f"{path}: no .lif files in this folder", flush=True)
         found += [(f, f.relative_to(path).as_posix()) for f in lifs]
-    return found
+    unique = {}
+    for path, label in found:
+        unique.setdefault(path.resolve(), (path, label))
+    return list(unique.values())
 
 
 def main(argv=None):
@@ -81,9 +83,13 @@ def main(argv=None):
 
     def report(line):
         print(clear + line, flush=True)
-        word, *rest = re.split(r"\s{2,}", line.strip(), maxsplit=2)   ## the word, the series name, the reason
+
+    def result(word, name, reason):
+        nonlocal converted_bytes
+        if word == "ok":
+            converted_bytes += job_bytes(next(j for j in jobs if j[0] == name))
         if word in ("skipped", "FAILED"):
-            problems.append(f"  {label}: " + (f"{rest[0]}: {word}, {rest[1]}" if len(rest) == 2 else f"{word}, {' '.join(rest)}"))
+            problems.append(f"  {label}: " + (f"{name}: " if name else "") + f"{word}, {reason}")
 
     if not files:   ## only empty folders: nothing to do is not a failure
         return 0
@@ -96,6 +102,20 @@ def main(argv=None):
             plans.append((path, label, out, plan(path, args.only, args.tiles, out), None))
         except Exception as e:   ## one bad file does not stop the others
             plans.append((path, label, out, [], f"{type(e).__name__}: {e}"))
+    missing = lambda jobs: len(jobs) == 1 and (jobs[0][4] or "").startswith("FAILED: no series has the name ")
+    matched = args.only is not None and any(jobs and not missing(jobs) for *_, jobs, _ in plans)
+    outputs = {}
+    for path, label, out, jobs, error in plans:
+        if matched and missing(jobs):
+            jobs[0] = (args.only, None, None, None, "SKIPPED: no series has that name")
+        for i, (name, info, tile, target, problem) in enumerate(jobs):
+            if target is None:
+                continue
+            key = str(target.resolve()).casefold()
+            if key in outputs:
+                jobs[i] = (name, None, tile, target, f"FAILED: output already planned by {outputs[key]}")
+            else:
+                outputs[key] = path
     todo = lambda jobs: [j for j in jobs if j[1] is not None and not j[3].exists()]
     all_series = sum(len(jobs) for *_, jobs, _ in plans)
     bytes_left, bytes_done, series_done = sum(job_bytes(j) for *_, jobs, _ in plans for j in todo(jobs)), 0, 0
@@ -103,14 +123,16 @@ def main(argv=None):
         size = sum(job_bytes(j) for j in jobs)
         print(f"[{k}/{len(plans)}] {label}" + (f"   {len(jobs)} series, {_gb(size)}" if jobs else ""), flush=True)
         began, mine = time.time(), sum(job_bytes(j) for j in todo(jobs))
+        converted_bytes = 0
         if error:
+            result("FAILED", "", error)
             report(f"  FAILED    {error}")
             counts = {"failed": 1}
         else:
-            counts = convert(path, args.only, args.tiles, out, report, status, fields, args.verbose, jobs)
+            counts = convert(path, args.only, args.tiles, out, report, status, fields, args.verbose, jobs, result=result)
         for key, n in counts.items():
             total[key] = total.get(key, 0) + n
-        bytes_left, bytes_done, series_done = bytes_left - mine, bytes_done + mine, series_done + len(jobs)
+        bytes_left, bytes_done, series_done = bytes_left - mine, bytes_done + converted_bytes, series_done + len(jobs)
         parts = [f"{n} {word}" for word, n in (("converted", counts.get("ok", 0)), ("already there", counts.get("there", 0)),
                                                ("skipped", counts.get("skipped", 0)), ("failed", counts.get("failed", 0))) if n]
         end = f"  file done: {', '.join(parts) or 'nothing to do'} in {_took(time.time() - began)}."

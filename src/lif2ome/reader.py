@@ -15,6 +15,10 @@ KINDS = {"stack": "3D stack", "movie": "2D movie", "image": "2D image"}
 OME_ORDER = "TCZYX"
 
 
+class Unsupported(ValueError):
+    """ A series that this reader does not convert. """
+
+
 @dataclass
 class ImageInfo:
     path: str
@@ -78,7 +82,7 @@ def series_list(path):
 
 
 def read_info(path, series=0, tiles=False):
-    """ What one series holds. Raises ValueError, with a sentence for the user, for a series this library does not
+    """ What one series holds. Raises Unsupported, with a sentence for the user, for a series this library does not
     convert: a series with other axes than T, Z, C, Y, X, and a tile scan unless tiles is True.
     A cross-section (XZ scan) has planes of Z by X. A plane of an OME-TIFF is Y by X, so the info names the axes as
     the file has them: Y of the file is Z of the microscope, and Z of the file is Y of the microscope """
@@ -91,7 +95,7 @@ def read_info(path, series=0, tiles=False):
         if "M" in im.dims:
             n_tiles = shape[im.dims.index("M")]
             if not tiles:
-                raise ValueError(f"tile scan with {n_tiles} tiles; convert the merged series, or use --tiles "
+                raise Unsupported(f"tile scan with {n_tiles} tiles; convert the merged series, or use --tiles "
                                  "for one file per tile")
             shape = tuple(n for d, n in zip(im.dims, shape) if d != "M")
             axes = axes.replace("M", "")
@@ -102,7 +106,7 @@ def read_info(path, series=0, tiles=False):
             z, y = y, z
             notes.append("cross-section: Y of the file is Z of the microscope")
         if len(set(axes)) < len(axes) or not set(axes) <= set(OME_ORDER) or not axes.endswith("YX"):
-            raise ValueError(f"axes {', '.join(im.dims)}: only T, Z, C, Y and X are read, with planes of Y by X or Z by X")
+            raise Unsupported(f"axes {', '.join(im.dims)}: only T, Z, C, Y and X are read, with planes of Y by X or Z by X")
         return ImageInfo(path, axes, shape, guess_kind(axes, shape), _lif_channel_names(im),
                          z / x if z and x else 1.0, series, series_name=im.name, dtype=str(im.dtype), notes=notes,
                          pixel_size=x * 1e6, pixel_size_y=y * 1e6, z_step=z * 1e6, time_step=t, tiles=n_tiles)
@@ -289,7 +293,13 @@ def _lif_channel_names(im):
     described = sorted(im.xml_element.findall("./Data/Image/ImageDescription/Channels/ChannelDescription"),
                        key=lambda c: int(c.attrib.get("BytesInc", 0)))   ## liffile's channel order
     names = []
-    for i, name in enumerate(str(c) for c in im.coords.get("C", [])):
+    channels = im.coords.get("C")
+    if channels is None:
+        channels = getattr(im, "_channel_names", None)
+    if channels is None:
+        channels = [c.findtext("ChannelProperty[Key='DyeName']/Value", "").removeprefix("Leica/")
+                    or c.attrib.get("LUTName", "") for c in described]
+    for i, name in enumerate(str(c) for c in channels):
         if name.startswith("Ch") and name[2:].isdigit() or name in ("Red", "Green", "Blue"):
             name = described[i].attrib.get("LUTName") if i < len(described) else ""
         names.append(name or f"Channel {i + 1}")

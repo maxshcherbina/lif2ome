@@ -76,9 +76,9 @@ def fake(monkeypatch, tmp_path):
     def read_info(path, s, tiles=False):
         name, axes, shape = series[s]
         if axes is None:
-            raise ValueError("axes L, X: only T, Z, C, Y and X are read")
+            raise reader.Unsupported("axes L, X: only T, Z, C, Y and X are read")
         if name == "Tiles" and not tiles:
-            raise ValueError("tile scan with 3 tiles, skipped; convert the merged series")
+            raise reader.Unsupported("tile scan with 3 tiles, skipped; convert the merged series")
         return lif2ome.ImageInfo(str(path), axes, shape, lif2ome.guess_kind(axes, shape), ["a", "b"], series=s,
                                  series_name=name, dtype="uint16", pixel_size=0.1, z_step=0.5,
                                  tiles=3 if name == "Tiles" else 0)
@@ -324,3 +324,253 @@ def test_one_file_has_no_total(fake, capsys):
     assert lif2ome.main([str(lif), "--only", "Both"]) == 0
     out = capsys.readouterr().out
     assert "[1/1] f.lif   1 series" in out and "file done: 1 converted in" in out and "Total:" not in out
+
+
+@pytest.mark.parametrize('names, labels', [
+    (['a:b', 'a_b'], ['a:b', 'a_b (2)']),
+    (['A', 'A', 'A (2)'], ['A', 'A (2)', 'A (2) (2)']),
+    (['Series1', 'series1'], ['Series1', 'series1 (2)']),
+    (['A', 'B'], ['A', 'B']),
+])
+def test_plan_unique_paths(fake, monkeypatch, names, labels):
+    lif, _ = fake
+    monkeypatch.setattr(reader, 'series_list', lambda path: names)
+    original = reader.read_info
+    monkeypatch.setattr(reader, 'read_info', lambda path, s, tiles: original(path, 0, tiles))
+    jobs = converter.plan(lif)
+    assert [j[0] for j in jobs] == labels
+    assert converter.plan(lif) == jobs
+    assert converter.plan(lif, only=labels[1]) == [j for name, j in zip(names, jobs) if labels[1] in (name, j[0])]
+    paths = [str(j[3]).casefold() for j in jobs if j[3]]
+    assert len(paths) == len(set(paths))
+    assert lif2ome.convert(lif, report=lambda line: None)["ok"] == len(names)
+    assert lif2ome.convert(lif, report=lambda line: None)["there"] == len(names)
+
+
+def test_expand_removes_resolved_duplicates(tmp_path):
+    from lif2ome.cli import _expand
+    root = tmp_path / 'share'
+    root.mkdir()
+    path = root / 'a.lif'
+    path.touch()
+    alias = tmp_path / 'alias.lif'
+    alias.symlink_to(path)
+    assert _expand([root, path, alias]) == [(path, 'a.lif')]
+
+
+def test_main_output_collision(fake, tmp_path, capsys):
+    first = tmp_path / 'x' / 'e.lif'
+    second = tmp_path / 'y' / 'E.lif'
+    assert lif2ome.main([str(first), str(second), '--out', str(tmp_path / 'o'), '--only', 'Both']) == 1
+    text = capsys.readouterr().out
+    assert f'FAILED, output already planned by {first}' in text
+    assert '1 converted, 0 already there, 0 skipped, 1 failed' in text
+
+
+def test_value_error_is_failure(fake, monkeypatch):
+    def fail(*args):
+        raise ValueError('invalid data_type')
+    monkeypatch.setattr(reader, 'read_info', fail)
+    lines = []
+    assert lif2ome.convert(fake[0], only='Both', report=lines.append)['failed'] == 1
+    assert 'FAILED' in lines[0] and 'ValueError: invalid data_type' in lines[0]
+    assert issubclass(lif2ome.Unsupported, ValueError)
+
+
+def test_failure_rate_and_lines(fake, monkeypatch):
+    lif, _ = fake
+    jobs = converter.plan(lif)[:2] + converter.plan(lif)[-1:]
+    sizes = [converter.job_bytes(j) for j in jobs]
+    times = iter([0, 10])
+    monkeypatch.setattr(converter.time, 'time', lambda: next(times))
+    def run(info, *args):
+        return info.series != 0, 'written' if info.series else 'broken', ''
+    monkeypatch.setattr(converter, '_convert_one', run)
+    estimates = []
+    monkeypatch.setattr(converter, '_time_left', lambda seconds: estimates.append(seconds) or 'about N s left')
+    lines = []
+    counts = lif2ome.convert(lif, jobs=jobs, report=lines.append)
+    assert counts['failed'] == 1 and counts['ok'] == 2
+    assert 'left' not in lines[0] and 'left' in lines[1] and 'left' not in lines[2]
+    assert estimates == [sizes[2] * 10 / sizes[1]]
+
+
+def test_only_across_files(fake, monkeypatch, capsys):
+    lif, _ = fake
+    other = lif.with_name('other.lif')
+    original = reader.series_list
+    monkeypatch.setattr(reader, 'series_list', lambda path: ['Else'] if path == other else original(path))
+    assert lif2ome.main([str(other), str(lif), '--only', 'A (2)']) == 0
+    text = capsys.readouterr().out
+    assert 'other.lif: A (2): skipped, no series has that name' in text
+    assert '1 converted, 0 already there, 1 skipped, 0 failed' in text
+    assert 'left' not in text.split('Total:')[-1]
+    assert lif2ome.main([str(other), str(lif), '--only', 'missing']) == 1
+    text = capsys.readouterr().out
+    assert 'Series names: Else' in text and 'Series names: A, A, XZ, Tiles, Both' in text
+    assert '2 failed' in text
+
+
+def test_summary_preserves_spaces(fake, monkeypatch, capsys):
+    monkeypatch.setattr(reader, 'series_list', lambda path: ['Pos 1  merged'])
+    def fail(*args):
+        raise reader.Unsupported('unsupported axes')
+    monkeypatch.setattr(reader, 'read_info', fail)
+    assert lif2ome.main([str(fake[0])]) == 0
+    assert 'f.lif: Pos 1  merged: skipped, unsupported axes' in capsys.readouterr().out
+
+
+@pytest.fixture
+def lif_images(monkeypatch):
+    from xml.etree import ElementTree
+    from types import SimpleNamespace
+    images = []
+    class File:
+        def __init__(self, path):
+            self.images = images
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.close()
+        def close(self):
+            pass
+    monkeypatch.setattr(reader.liffile, 'LifFile', File)
+    def add(dims, shape, coords=None, xml='<Element/>'):
+        data = stack(shape)
+        im = SimpleNamespace(name='Test', dims=tuple(dims), shape=shape, dtype=data.dtype,
+                             coords=coords or {}, xml_element=ElementTree.fromstring(xml),
+                             timestamps=None, asarray=lambda: data)
+        images.append(im)
+        return im, len(images) - 1
+    return add
+
+
+def test_reader_stack_and_part(lif_images):
+    im, s = lif_images('ZCYX', (3, 2, 4, 5), {'Z': [4e-6, 2e-6, 0], 'Y': [0, 1e-6, 2e-6, 3e-6],
+                                               'X': np.arange(5) * 0.5e-6, 'C': ['DAPI', 'GFP']})
+    info = reader.read_info('f.lif', s)
+    assert (info.axes, info.shape, info.kind) == ('ZCYX', im.shape, 'stack')
+    assert (info.pixel_size, info.pixel_size_y, info.z_step, info.anisotropy) == pytest.approx((0.5, 1, 2, 4))
+    data, axes = reader.read_series(info)
+    assert axes == 'CZYX'
+    np.testing.assert_array_equal(data, im.asarray().transpose(1, 0, 2, 3))
+    np.testing.assert_array_equal(reader.read_part(info, [1], (1, 2), (1, 3, 2, 5)), data[1:2, 1:3, 1:3, 2:5])
+    assert reader._lif_step({}, 'T') == 0
+    assert reader._lif_step({'T': [2]}, 'T') == 0
+
+
+def test_reader_cross_section(lif_images):
+    im, s = lif_images('YCZX', (3, 2, 4, 5), {'Y': [0, 3e-6, 6e-6], 'Z': np.arange(4) * 2e-6,
+                                               'X': np.arange(5) * 0.5e-6, 'C': ['DAPI', 'GFP']})
+    info = reader.read_info('f.lif', s)
+    assert info.axes == 'ZCYX' and info.shape == im.shape
+    assert (info.pixel_size_y, info.z_step, info.anisotropy) == pytest.approx((2, 3, 6))
+    assert info.notes == ['cross-section: Y of the file is Z of the microscope']
+    data, axes = reader.read_series(info)
+    assert axes == 'CZYX'
+    np.testing.assert_array_equal(data, im.asarray().transpose(1, 0, 2, 3))
+
+
+def test_reader_tiles(lif_images, monkeypatch):
+    from types import SimpleNamespace
+    im, s = lif_images('MZCYX', (3, 4, 2, 5, 6), {'C': ['DAPI', 'GFP']})
+    with pytest.raises(reader.Unsupported, match='tile scan with 3 tiles'):
+        reader.read_info('f.lif', s)
+    info = reader.read_info('f.lif', s, tiles=True)
+    assert info.axes == 'ZCYX' and info.shape == (4, 2, 5, 6) and info.tiles == 3
+    calls = []
+    def frames(image, *, M):
+        assert image is im
+        calls.append(M)
+        return SimpleNamespace(asarray=lambda: im.asarray()[M])
+    monkeypatch.setattr(reader.liffile, 'LifImageFrames', frames)
+    data, axes = reader.read_series(info, tile=1)
+    assert calls == [1] and axes == 'CZYX'
+    np.testing.assert_array_equal(data, im.asarray()[1].transpose(1, 0, 2, 3))
+    np.testing.assert_array_equal(reader.read_part(info, [0], tile=2), im.asarray()[2].transpose(1, 0, 2, 3)[:1])
+
+
+@pytest.mark.parametrize('coords, channels, expected', [
+    ({'C': ['DAPI', 'Ch1']}, '<ChannelDescription BytesInc="2" LUTName="Green"/><ChannelDescription BytesInc="0" LUTName="Blue"/>', ['DAPI', 'Green']),
+    ({'C': ['Ch0', 'Ch1']}, '<ChannelDescription LUTName="Green"/><ChannelDescription LUTName="Green"/>', ['Green 1', 'Green 2']),
+    ({}, '<ChannelDescription LUTName="Blue"><ChannelProperty><Key>DyeName</Key><Value>Leica/DAPI</Value></ChannelProperty></ChannelDescription>', ['DAPI']),
+    ({}, '<ChannelDescription LUTName="Green"/>', ['Green']),
+    ({}, '<ChannelDescription/>', ['Channel 1']),
+])
+def test_reader_channel_names(lif_images, coords, channels, expected):
+    xml = f'<Element><Data><Image><ImageDescription><Channels>{channels}</Channels></ImageDescription></Image></Data></Element>'
+    im, s = lif_images('CYX' if coords else 'YX', (2, 4, 5) if coords else (4, 5), coords, xml)
+    assert reader._lif_channel_names(im) == expected
+    assert reader.read_info('f.lif', s).channels == expected
+
+
+def test_reader_movie_and_axes_refusal(lif_images):
+    _, s = lif_images('TYX', (3, 4, 5), {'T': [10, 12.5, 15]})
+    info = reader.read_info('f.lif', s)
+    assert info.kind == 'movie' and info.time_step == 2.5
+    assert reader.read_settings('f.lif', s)['Time between frames (s)'] == '2.5'
+    _, s = lif_images('LX', (4, 5))
+    with pytest.raises(reader.Unsupported, match='axes L, X'):
+        reader.read_info('f.lif', s)
+
+
+def test_reader_sequential_settings(lif_images):
+    xml = '''<Element><Data><Image><Attachment Name="HardwareSetting" SystemTypeName="SP8" Software="LAS X">
+    <ATLConfocalSettingDefinition ObjectiveName="40x OIL" Zoom="0.75" Pinhole="0.000065"/>
+    <LDM_Block_Sequential><LDM_Block_Sequential_Master><ATLConfocalSettingDefinition>
+      <Detector Name="HyD1" Channel="0" IsActive="1" Gain="100" Offset="2"/>
+      <MultiBand Channel="0" LeftWorld="500" RightWorld="550" DyeName="GFP"/>
+    </ATLConfocalSettingDefinition></LDM_Block_Sequential_Master><LDM_Block_Sequential_List>
+    <ATLConfocalSettingDefinition UserSettingName="Green">
+      <LaserLineSetting LaserLine="488" IntensityDev="1"/>
+      <LaserLineSetting LaserLine="561" IntensityDev="0"/>
+      <Detector Name="HyD1" Channel="0" IsActive="1"/>
+    </ATLConfocalSettingDefinition>
+    <ATLConfocalSettingDefinition>
+      <LaserLineSetting LaserLine="561" IntensityDev="2"/>
+      <Detector Name="HyD1" Channel="0" IsActive="1" Gain="200"/>
+      <MultiBand Channel="0" LeftWorld="570" RightWorld="620" DyeName="RFP"/>
+    </ATLConfocalSettingDefinition>
+    </LDM_Block_Sequential_List></LDM_Block_Sequential></Attachment></Image></Data></Element>'''
+    im, s = lif_images('YX', (4, 5), xml=xml)
+    im.timestamps = [np.datetime64('2026-11-09T10:20:30')]
+    settings = reader.read_settings('f.lif', s)
+    assert settings == {'Source file': 'f.lif', 'Series': 'Test', 'Acquired': '2026-11-09 10:20:30',
+                        'Microscope': 'SP8', 'Software': 'LAS X', 'Objective': '40x OIL', 'Zoom': '0.75',
+                        'Pinhole (µm)': '65', 'Green: Laser 488 nm (%)': '1',
+                        'Green: Detector HyD1': 'gain 100, offset 2, 500 to 550 nm, GFP',
+                        'Seq. 2: Laser 561 nm (%)': '2',
+                        'Seq. 2: Detector HyD1': 'gain 200, offset 2, 570 to 620 nm, RFP'}
+
+
+def test_single_channel_liffile_names(lif_images):
+    im, s = lif_images('YX', (4, 5), xml='<Element><Data><Image><ImageDescription><Channels>'
+                       '<ChannelDescription LUTName="Green"/></Channels></ImageDescription></Image></Data></Element>')
+    im._channel_names = ('GFP',)
+    assert reader.read_info('f.lif', s).channels == ['GFP']
+    im._channel_names = ('Ch0',)
+    assert reader.read_info('f.lif', s).channels == ['Green']
+
+
+def test_main_total_after_failure(fake, monkeypatch, capsys):
+    lif, _ = fake
+    paths = [lif, lif.with_name('second.lif'), lif.with_name('third.lif')]
+    def run(info, *args):
+        return info.path != str(lif), 'finished' if info.path != str(lif) else 'broken', ''
+    monkeypatch.setattr(converter, '_convert_one', run)
+    assert lif2ome.main([*(str(p) for p in paths), '--only', 'Both']) == 1
+    text = capsys.readouterr().out
+    totals = [line for line in text.splitlines() if 'Total:' in line]
+    assert len(totals) == 3
+    assert 'left' not in totals[0] and 'left' in totals[1] and 'left' not in totals[2]
+    assert 'left' not in text.split('Not converted:')[1]
+
+
+def test_plan_tile_label_collision(fake, monkeypatch):
+    lif, _ = fake
+    original = reader.read_info
+    monkeypatch.setattr(reader, 'series_list', lambda path: ['Tiles', 'Tiles - tile 01'])
+    monkeypatch.setattr(reader, 'read_info', lambda path, s, tiles: original(path, 3 if s == 0 else 0, tiles))
+    jobs = converter.plan(lif, tiles=True)
+    assert [j[0] for j in jobs] == ['Tiles - tile 01', 'Tiles - tile 02', 'Tiles - tile 03', 'Tiles - tile 01 (2)']
+    assert converter.plan(lif, only='Tiles - tile 01 (2)', tiles=True) == [jobs[-1]]

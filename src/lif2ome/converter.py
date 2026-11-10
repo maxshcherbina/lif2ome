@@ -1,4 +1,4 @@
-"""Convert every series of a file, and check each new file against the source pixels."""
+"""Convert every series of a file. Each new file is read back and compared with the pixels that were read."""
 import re
 import time
 from pathlib import Path
@@ -100,34 +100,43 @@ def plan(path, only=None, tiles=False, out_dir=None):
     """ The jobs of one file, one per output file: [(label, info, tile, out, error)]. A series that is not converted
     has an error text ("SKIPPED: ..." or "FAILED: ...") and no info """
     path = Path(path)
-    jobs, seen = [], {}
+    jobs, selected, used = [], [], set()
     names = reader.series_list(path)
-    if only is not None and only not in names:
-        return [(only, None, None, None, f"FAILED: no series has the name {only!r}. Series names: {', '.join(names)}")]
+
+    def unique(label):
+        base, n = label, 1
+        while str(out_path(path, label, out_dir)).casefold() in used:
+            n += 1
+            label = f"{base} ({n})"
+        used.add(str(out_path(path, label, out_dir)).casefold())
+        return label
+
     for s, name in enumerate(names):
-        seen[name] = seen.get(name, 0) + 1
-        label = name if seen[name] == 1 else f"{name} ({seen[name]})"   ## two series with one name: none is lost
-        if only is not None and name != only:
-            continue
+        label = unique(name)
         try:
             info = reader.read_info(path, s, tiles)
-        except ValueError as e:
-            jobs.append((label, None, None, None, f"SKIPPED: {e}"))
-            continue
+        except reader.Unsupported as e:
+            series_jobs = [(label, None, None, None, f"SKIPPED: {e}")]
         except Exception as e:
-            jobs.append((label, None, None, None, f"FAILED: {type(e).__name__}: {e}"))
-            continue
-        width = max(len(str(info.tiles)), 2)
-        for tile in range(info.tiles) if info.tiles else [None]:
-            full = label if tile is None else f"{label} - tile {tile + 1:0{width}d}"
-            jobs.append((full, info, tile, out_path(path, full, out_dir), None))
-    return jobs
+            series_jobs = [(label, None, None, None, f"FAILED: {type(e).__name__}: {e}")]
+        else:
+            width = max(len(str(info.tiles)), 2)
+            series_jobs = []
+            for tile in range(info.tiles) if info.tiles else [None]:
+                full = label if tile is None else unique(f"{label} - tile {tile + 1:0{width}d}")
+                series_jobs.append((full, info, tile, out_path(path, full, out_dir), None))
+        jobs.extend(series_jobs)
+        selected.extend(j for j in series_jobs if only in (name, label, j[0]))
+    if only is None:
+        return jobs
+    return selected or [(only, None, None, None,
+                         f"FAILED: no series has the name {only!r}. Series names: {', '.join(names)}")]
 
 
 def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lambda text: None, metadata=None,
-            verbose=False, jobs=None):
+            verbose=False, jobs=None, result=None):
     """ Every series of a file as an OME-TIFF (only: that series name only). Each file is read back and compared with
-    the source pixels. A file that exists is left alone, so a stopped run goes on from the next series. Returns the
+    the pixels that were read from the source. A file that exists is left alone, so a stopped run goes on from the next series. Returns the
     counts {"ok", "there", "skipped", "failed"}.
 
     report gets one line when a series is done: a word (ok, there, skipped, FAILED), the series name, and the sizes
@@ -135,7 +144,8 @@ def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lam
     the pixel sizes to an ok line. status gets a line each time the work on a series goes to its next step.
     metadata: a dict of your own fields, for example {"genotype": "Ecad"}; each new file gets them. Each new file
     also gets the microscope settings and the full Leica XML of its series; writer.read_metadata gives all three back.
-    jobs: the result of plan() for this file, when the caller has it already """
+    jobs: the result of plan() for this file, when the caller has it already.
+    result: an optional callback receiving (word, label, reason) for each finished series """
     jobs = plan(path, only, tiles, out_dir) if jobs is None else jobs
     counts = {"ok": 0, "there": 0, "skipped": 0, "failed": 0}
     width = min(max((len(job[0]) for job in jobs), default=0), 40)
@@ -156,11 +166,15 @@ def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lam
             except Exception as e:   ## one bad series does not stop the others
                 ok, rest, details = False, f"{type(e).__name__}: {e}", ""
             key, word = ("ok", "ok") if ok else ("failed", "FAILED")
-            done, left = done + job_bytes(job), left - job_bytes(job)
-            if left > 0:
+            left -= job_bytes(job)
+            if ok:
+                done += job_bytes(job)
+            if ok and left > 0:
                 rest += ", " + _time_left(left * (time.time() - start) / done)
             if verbose and details:
                 rest += "\n" + " " * (width + 14) + details
         counts[key] += 1
         report(line(word, label, rest))
+        if result is not None:
+            result(word, label, rest)
     return counts

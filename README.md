@@ -1,6 +1,7 @@
 # lif2ome
 
-Convert Leica `.lif` files to OME-TIFF, one file per series, with a pixel-for-pixel check of every file written.
+Convert Leica `.lif` files to OME-TIFF, one file per series. Every file is read back after it is written and compared
+with the pixels that were read from the `.lif`.
 
 ## Features
 
@@ -8,7 +9,7 @@ Convert Leica `.lif` files to OME-TIFF, one file per series, with a pixel-for-pi
 - Stores the pixel size, the Z step, the time between frames and the channel names in each file.
 - Keeps the microscope settings: each file carries the full Leica XML of its series, plus a short summary you can read.
 - Stores your own fields in each file, such as the genotype.
-- Reads every new file back and compares it with the pixels in the `.lif`.
+- Reads every new file back and checks that it holds the same pixels that were read from the `.lif`.
 - Skips files that already exist, so an interrupted run picks up at the next series.
 
 The output is standard OME-TIFF, the format that Fiji, napari, QuPath and bioio read.
@@ -46,8 +47,8 @@ While a series is being converted, a status line shows which step it is on:
   working   Series002  0.48 GB, writing (step 2 of 3) ...
 ```
 
-The result replaces that line when the series finishes. `ok` means the file was written and its pixels were checked
-against the source. Each file ends with a summary line, and the run ends with the totals, the output folders, and the
+The result replaces that line when the series finishes. `ok` means the file was written, read back,
+and found to hold the pixels that were read. Each file ends with a summary line, and the run ends with the totals, the output folders, and the
 series that were not converted:
 
 ```
