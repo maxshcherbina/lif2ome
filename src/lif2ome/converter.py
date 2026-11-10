@@ -59,8 +59,11 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.name + ".part")
     status("writing (step 2 of 3)")
-    write_ome(part, data, axes, info.channels, info.pixel_size, info.z_step, metadata,
-              reader.read_settings(info.path, info.series), reader.read_xml(info.path, info.series))
+    settings = reader.read_settings(info.path, info.series)
+    if info.notes:
+        settings["Note on the axes"] = "; ".join(info.notes)
+    write_ome(part, data, axes, info.channels, info.pixel_size, info.z_step, metadata, settings,
+              reader.read_xml(info.path, info.series), info.pixel_size_y, info.time_step)
     ## ponytail: the check holds the series twice in memory; compare plane by plane if a series outgrows the memory
     status("checking the pixels (step 3 of 3)")
     if not _same_pixels(part, data, axes):
@@ -72,6 +75,8 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     size = out.stat().st_size
     size = f"{size / 1e9:.2f} GB" if size >= 1e8 else f"{size / 1e6:.1f} MB"
     z = f", z step {info.z_step:.4f} µm" if info.z_step and "Z" in axes else ""
+    z += f", {info.time_step:.4g} s between frames" if info.time_step and "T" in axes else ""
+    z += "".join(f", {note}" for note in info.notes)
     return (f"ok, {axes} {data.shape} {data.dtype}, channels {info.channels}, {info.pixel_size:.4f} µm/px{z}, "
             f"{size}{big}, pixels match")
 

@@ -1,7 +1,7 @@
 """Read a series of a Leica .lif file: what it holds, and its pixels.
 
 The reader uses liffile. bioio-lif gives the colour names as channel names, keeps a negative Z step (a stack taken
-top to bottom) and cannot tell a cross-section (XZ scan) from a stack. A .czi file is read through bioio when bioio and
+top to bottom) and gives a cross-section (XZ scan) the axes of a stack. A .czi file is read through bioio when bioio and
 bioio-czi are installed; that path has no test with a real file.
 """
 from dataclasses import dataclass, field
@@ -28,6 +28,8 @@ class ImageInfo:
     dtype: str = "uint8"
     notes: list = field(default_factory=list)
     pixel_size: float = 0.0   ## the X step in µm; 0: not known
+    pixel_size_y: float = 0.0   ## the Y step in µm; 0: the same as X
+    time_step: float = 0.0    ## the time between frames in seconds; 0: not known or no T axis
     z_step: float = 0.0       ## the Z step in µm; 0: not known or no Z axis
     tiles: int = 0            ## the number of tiles of a tile scan; 0: not a tile scan
 
@@ -77,15 +79,13 @@ def series_list(path):
 
 def read_info(path, series=0, tiles=False):
     """ What one series holds. Raises ValueError, with a sentence for the user, for a series this library does not
-    convert: a cross-section, a series with other axes than T, Z, C, Y, X, and a tile scan unless tiles is True """
+    convert: a series with other axes than T, Z, C, Y, X, and a tile scan unless tiles is True.
+    A cross-section (XZ scan) has planes of Z by X. A plane of an OME-TIFF is Y by X, so the info names the axes as
+    the file has them: Y of the file is Z of the microscope, and Z of the file is Y of the microscope """
     path = str(path)
     if not _is_lif(path):
         return _bioio_info(path, series)
     with _lif_image(path, series) as im:
-        setting = im.xml_element.find('./Data/Image/Attachment[@Name="HardwareSetting"]/ATLConfocalSettingDefinition')
-        scan = setting.attrib.get("ScanMode", "") if setting is not None else ""
-        if scan and not scan.startswith("xy"):   ## only the scan mode tells a cross-section from a stack
-            raise ValueError(f"cross-section (scan mode {scan}), not a stack or a movie")
         axes, shape = "".join(d[0] for d in im.dims), tuple(im.shape)
         n_tiles = 0
         if "M" in im.dims:
@@ -95,12 +95,25 @@ def read_info(path, series=0, tiles=False):
                                  "for one file per tile")
             shape = tuple(n for d, n in zip(im.dims, shape) if d != "M")
             axes = axes.replace("M", "")
-        if len(set(axes)) < len(axes) or not set(axes) <= set(OME_ORDER):
-            raise ValueError(f"axes {', '.join(im.dims)}: only T, Z, C, Y and X are read")
-        z, x = _lif_step(im.coords, "Z"), _lif_step(im.coords, "X")
+        z, y, x, t = (_lif_step(im.coords, ax) for ax in "ZYXT")
+        axes, cross = cross_section_axes(axes)
+        notes = []
+        if cross:
+            z, y = y, z
+            notes.append("cross-section: Y of the file is Z of the microscope")
+        if len(set(axes)) < len(axes) or not set(axes) <= set(OME_ORDER) or not axes.endswith("YX"):
+            raise ValueError(f"axes {', '.join(im.dims)}: only T, Z, C, Y and X are read, with planes of Y by X or Z by X")
         return ImageInfo(path, axes, shape, guess_kind(axes, shape), _lif_channel_names(im),
-                         z / x if z and x else 1.0, series, series_name=im.name, dtype=str(im.dtype),
-                         pixel_size=x * 1e6, z_step=z * 1e6, tiles=n_tiles)
+                         z / x if z and x else 1.0, series, series_name=im.name, dtype=str(im.dtype), notes=notes,
+                         pixel_size=x * 1e6, pixel_size_y=y * 1e6, z_step=z * 1e6, time_step=t, tiles=n_tiles)
+
+
+def cross_section_axes(axes):
+    """ (axes, True) with the letters Z and Y exchanged when the planes are Z by X (a cross-section); else
+    (axes, False). ZX gives YX; YZX, a pile of cross-sections along Y, gives ZYX """
+    if axes.endswith("ZX"):
+        return axes.translate(str.maketrans("ZY", "YZ")), True
+    return axes, False
 
 
 def read_series(info, tile=None):
@@ -184,6 +197,9 @@ def _lif_settings(im, out):
     stamps = im.timestamps
     if stamps is not None and len(stamps):
         out["Acquired"] = str(stamps[0]).split(".")[0].replace("T", " ")
+    step = _lif_step(im.coords, "T")
+    if step:
+        out["Time between frames (s)"] = _num(step, 4)
     hw = im.xml_element.find('./Data/Image/Attachment[@Name="HardwareSetting"]')
     if hw is None:
         return
@@ -261,7 +277,8 @@ class _lif_image:
 
 
 def _lif_step(coords, axis):
-    """ The step in metres of one axis: |last - first| / (N - 1); a top-to-bottom stack has a negative span """
+    """ The step of one axis, in metres (in seconds for T): |last - first| / (N - 1); a top-to-bottom stack has a
+    negative span """
     values = coords.get(axis)
     return abs(float(values[-1]) - float(values[0])) / (len(values) - 1) if values is not None and len(values) > 1 else 0
 
@@ -297,4 +314,5 @@ def _bioio_info(path, series):
     shape, sizes = tuple(img.dims.shape), img.physical_pixel_sizes
     return ImageInfo(str(path), OME_ORDER, shape, guess_kind(OME_ORDER, shape), [str(c) for c in img.channel_names],
                      (sizes.Z / sizes.X) if sizes.Z and sizes.X else 1.0, series, series_name=str(img.scenes[series]),
-                     dtype=str(img.dtype), pixel_size=float(sizes.X or 0), z_step=float(sizes.Z or 0))
+                     dtype=str(img.dtype), pixel_size=float(sizes.X or 0), pixel_size_y=float(sizes.Y or 0),
+                     z_step=float(sizes.Z or 0))

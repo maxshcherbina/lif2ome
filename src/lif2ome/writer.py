@@ -13,18 +13,21 @@ NAMESPACE = "lif2ome/"   ## fields, settings, leica-xml
 
 
 def write_ome(path, data, axes, channel_names=None, pixel_size=0.0, z_step=0.0, metadata=None, settings=None,
-              leica_xml=None):
+              leica_xml=None, pixel_size_y=0.0, time_step=0.0):
     """ One OME-TIFF, zlib compressed (lossless). axes names the axes of data, for example CZYX. pixel_size and z_step
-    are in µm; 0 leaves the size out of the file. metadata: the fields of the user, a dict. settings: the microscope
+    are in µm; 0 leaves the size out of the file. pixel_size_y: the Y step in µm when it is not the X step. time_step:
+    the time between frames in seconds. metadata: the fields of the user, a dict. settings: the microscope
     settings in readable form, a dict. leica_xml: the Leica XML of the series, a text. read_metadata gives them back """
     path = Path(path)
     meta = {"axes": axes}
     if channel_names:
         meta["Channel"] = {"Name": list(channel_names)}
     if pixel_size:
-        meta.update(PhysicalSizeX=pixel_size, PhysicalSizeY=pixel_size)
+        meta.update(PhysicalSizeX=pixel_size, PhysicalSizeY=pixel_size_y or pixel_size)
     if z_step and "Z" in axes:
         meta["PhysicalSizeZ"] = z_step
+    if time_step and "T" in axes:
+        meta.update(TimeIncrement=time_step, TimeIncrementUnit="s")
     maps = [{"Namespace": NAMESPACE + name, "Value": {str(k): str(v) for k, v in pairs.items()}}
             for name, pairs in (("fields", metadata), ("settings", settings)) if pairs]
     if maps:

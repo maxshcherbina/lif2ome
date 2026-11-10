@@ -68,7 +68,7 @@ def test_to_cnyx():
 
 @pytest.fixture
 def fake(monkeypatch, tmp_path):
-    """ A made-up file "f.lif": two series named A, a cross-section, a tile scan of 3 tiles, a movie of stacks """
+    """ A made-up file "f.lif": two series named A, a series with axes that are not read, a tile scan of 3 tiles, a movie of stacks """
     series = {0: ("A", "ZCYX", (3, 2, 8, 8)), 1: ("A", "CYX", (2, 8, 8)), 2: ("XZ", None, None),
               3: ("Tiles", "CZYX", (2, 3, 8, 8)), 4: ("Both", "TZCYX", (2, 3, 2, 8, 8))}
     reads = []
@@ -76,7 +76,7 @@ def fake(monkeypatch, tmp_path):
     def read_info(path, s, tiles=False):
         name, axes, shape = series[s]
         if axes is None:
-            raise ValueError("cross-section (scan mode xzy), not a stack or a movie")
+            raise ValueError("axes L, X: only T, Z, C, Y and X are read")
         if name == "Tiles" and not tiles:
             raise ValueError("tile scan with 3 tiles, skipped; convert the merged series")
         return lif2ome.ImageInfo(str(path), axes, shape, lif2ome.guess_kind(axes, shape), ["a", "b"], series=s,
@@ -106,7 +106,7 @@ def test_convert(fake):
     assert names == ["f - A (2).ome.tif", "f - A.ome.tif", "f - Both.ome.tif"]
     assert lines[0].startswith("  [1/5] A: ok, CZYX (2, 3, 8, 8) uint16") and "pixels match" in lines[0]
     assert "left" in lines[0] and "left" not in lines[-1]
-    assert "SKIPPED: cross-section" in lines[2] and "SKIPPED: tile scan with 3 tiles" in lines[3]
+    assert "SKIPPED: axes L, X" in lines[2] and "SKIPPED: tile scan with 3 tiles" in lines[3]
     with tifffile.TiffFile(lif.parent / "f" / "f - Both.ome.tif") as tif:
         assert tif.series[0].axes == "TCZYX" and tif.series[0].shape == (2, 2, 3, 8, 8)
 
@@ -259,3 +259,22 @@ def test_meta_option(fake, capsys):
     assert lif2ome.read_metadata(lif.parent / "f" / "f - Both.ome.tif")["fields"] == {"genotype": "Ecad", "note": "a=b"}
     with pytest.raises(SystemExit):
         lif2ome.main([str(lif), "--meta", "genotype"])
+
+
+def test_cross_section_axes():
+    assert reader.cross_section_axes("ZX") == ("YX", True)
+    assert reader.cross_section_axes("CZX") == ("CYX", True)
+    assert reader.cross_section_axes("YZX") == ("ZYX", True)   ## a pile of cross-sections along Y
+    assert reader.cross_section_axes("TCYZX") == ("TCZYX", True)
+    assert reader.cross_section_axes("CZYX") == ("CZYX", False)
+
+
+def test_time_step_and_y_size_are_written(tmp_path):
+    f = tmp_path / "movie.ome.tif"
+    lif2ome.write_ome(f, stack((2, 4, 8, 8)), "CTYX", pixel_size=0.5, pixel_size_y=1.5, time_step=30.5)
+    xml = tifffile.TiffFile(f).ome_metadata
+    assert 'TimeIncrement="30.5"' in xml and 'TimeIncrementUnit="s"' in xml
+    assert 'PhysicalSizeX="0.5"' in xml and 'PhysicalSizeY="1.5"' in xml
+    g = tmp_path / "stack.ome.tif"
+    lif2ome.write_ome(g, stack(), "CZYX", pixel_size=0.5, time_step=30.5)
+    assert "TimeIncrement" not in tifffile.TiffFile(g).ome_metadata   ## no T axis: no time

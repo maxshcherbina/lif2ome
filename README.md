@@ -5,7 +5,7 @@ Convert Leica `.lif` files to OME-TIFF, one file per series, with a pixel-for-pi
 ## Features
 
 - Writes one OME-TIFF per series, with every channel. Compression is zlib, so no pixel value changes.
-- Stores the pixel size, the Z step and the channel names in each file.
+- Stores the pixel size, the Z step, the time between frames and the channel names in each file.
 - Keeps the microscope settings: each file carries the full Leica XML of its series, plus a short summary you can read.
 - Stores your own fields in each file, such as the genotype.
 - Reads every new file back and compares it with the pixels in the `.lif`.
@@ -89,6 +89,7 @@ My experiment/
 | A stack, or a single image | `CZYX` |
 | A movie | `CTYX` |
 | A movie of stacks | `TCZYX` |
+| A cross-section (XZ scan) | `CZYX`, where Y of the file is Z of the microscope |
 
 A channel is named after its dye if the `.lif` records one. Otherwise it takes the channel colour from LAS X, such as
 `Green`. With neither, it is `Channel 1`, `Channel 2`, and so on.
@@ -188,10 +189,10 @@ lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one serie
 
 - Tile scans are skipped unless you pass `--tiles`, and `--tiles` writes the tiles separately without stitching them.
   LAS X usually saves the merged image as another series in the same file.
-- Cross-sections (XZ scans) are skipped.
+- A cross-section (XZ scan) is stored with its depth axis as Y, because a plane of an OME-TIFF is always Y by X.
+  The Y pixel size in the file is then the depth step. This has not been run on a real cross-section yet.
 - A whole series is held in memory, plus a second copy for the pixel check.
-- The time between frames of a movie is not written.
-- `.czi` files need the `lif2ome[czi]` extra, which uses bioio. That path has never been run on a real file.
+- `.czi` support is experimental. It needs the `lif2ome[czi]` extra, which uses bioio.
 
 ## Development
 
