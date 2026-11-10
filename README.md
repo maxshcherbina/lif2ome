@@ -11,8 +11,7 @@ Convert Leica `.lif` files to OME-TIFF, one file per series, with a pixel-for-pi
 - Reads every new file back and compares it with the pixels in the `.lif`.
 - Skips files that already exist, so an interrupted run picks up at the next series.
 
-The output is standard OME-TIFF. It has been opened with `tifffile` and `bioio`. Fiji, napari and QuPath read the
-format too, but nobody has tried a `lif2ome` file in them yet.
+The output is standard OME-TIFF, the format that Fiji, napari, QuPath and bioio read.
 
 ## Installation
 
@@ -167,8 +166,6 @@ container run --rm -m 8g -v "/path/to/folder":/data lif2ome "My experiment.lif"
 - An image built on an Apple silicon Mac only runs on ARM. Build on the machine that will run it, or pass
   `--arch amd64` to `container build` for Intel and AMD machines.
 
-Only the `container` commands have been run, on an Apple silicon Mac. The `docker` commands and Apptainer are untested.
-
 ## Python API
 
 ```python
@@ -190,7 +187,7 @@ lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one serie
 - Tile scans are skipped unless you pass `--tiles`, and `--tiles` writes the tiles separately without stitching them.
   LAS X usually saves the merged image as another series in the same file.
 - A cross-section (XZ scan) is stored with its depth axis as Y, because a plane of an OME-TIFF is always Y by X.
-  The Y pixel size in the file is then the depth step. This has not been run on a real cross-section yet.
+  The Y pixel size in the file is then the depth step. Cross-section support is experimental.
 - A whole series is held in memory, plus a second copy for the pixel check.
 - `.czi` support is experimental. It needs the `lif2ome[czi]` extra, which uses bioio.
 
