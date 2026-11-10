@@ -137,8 +137,8 @@ Tile scan    14 x 16 tiles, overlap 10% by 10%; merged by lif2ome from the stage
 - If few overlaps match, the line says `CHECK THE MERGE`. The tiles then sit where the stage put them.
 - If the file already holds the merged image, a series named after the tile scan with "merged" in its name, the
   unmerged scan is skipped.
-- A tile that lies in no row and no column of the grid is left out of the merge. The settings summary says so, and
-  `--tiles` writes it.
+- A tile that lies in no row and no column of the grid is left out of the merge. The progress line and the settings
+  summary say so, and `--tiles` writes it.
 - `--tiles` writes one file per tile instead.
 
 ## Metadata

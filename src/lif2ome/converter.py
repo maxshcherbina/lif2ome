@@ -104,7 +104,11 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     details += "".join(f", {note}" for note in info.notes) + big
     words = f"{_gb(data.nbytes)} -> {_gb(out.stat().st_size)}   {_took(time.time() - start)}"
     if merged:
-        words += f"   merged {merged.split(';')[0]}" + ("; CHECK THE MERGE: few overlaps matched" if "CHECK" in merged else "")
+        words += f"   merged {merged.split(';')[0]}"
+        if tile.get("left_out"):
+            words += f"; {tile['left_out']} tile off the grid left out, --tiles writes it"
+        if "CHECK" in merged:
+            words += "; CHECK THE MERGE: few overlaps matched"
         details = merged.split("; ", 1)[1] + "\n" + details
     return True, words, details
 

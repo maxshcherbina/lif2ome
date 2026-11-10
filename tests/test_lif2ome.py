@@ -648,6 +648,7 @@ def test_convert_merges_a_tile_scan(fake, monkeypatch, capsys):
     assert lines[0].split()[:2] == ["ok", "Scan"] and "merged 3 x 3 tiles, overlap 25% by 25%" in lines[0]
     assert "of 20 overlaps matched" in lines[0] and "CHECK" not in lines[0]
     assert "1 tile off the grid left out" in lines[0]   ## the tile that is in no row and no column
+    assert "1 tile off the grid left out" in lines[0].split("\n")[0]   ## on the first line, with no --verbose
     assert [f.name for f in (lif.parent / "f").iterdir()] == ["f - Scan.ome.tif"]
     assert lif2ome.convert(lif, tiles=True, report=lambda line: None)["ok"] == 10   ## --tiles writes every tile
     merged = tifffile.imread(lif.parent / "f" / "f - Scan.ome.tif")
