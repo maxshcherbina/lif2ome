@@ -187,7 +187,7 @@ def test_bad_file_does_not_stop_main(fake, monkeypatch, capsys):
     assert lif2ome.main([str(bad), str(lif)]) == 1
     text = capsys.readouterr().out
     assert "  FAILED: KeyError: 'MemBlock_397'" in text
-    assert "Done: 3 converted, 0 already there, 2 skipped, 1 failed" in text
+    assert ": 3 converted, 0 already there, 2 skipped, 1 failed" in text
 
 
 def test_only_missing_name_fails(fake, capsys):
@@ -215,3 +215,17 @@ def test_real_file(tmp_path):
     counts = lif2ome.convert(lif, out_dir=tmp_path, report=lines.append)
     print("\n".join(lines))
     assert counts["failed"] == 0 and counts["ok"] > 0
+
+
+def test_status_and_summary(fake, capsys):
+    lif, _ = fake
+    steps = []
+    lif2ome.convert(lif, only="Both", report=lambda line: None, status=steps.append)
+    assert [s.split(", ")[-1] for s in steps] == ["reading (step 1 of 3)", "writing (step 2 of 3)",
+                                                  "checking the pixels (step 3 of 3)"]
+    assert steps[0].startswith("  [1/1] Both: 0.00 GB")
+    assert lif2ome.main([str(lif)]) == 0
+    out = capsys.readouterr().out
+    assert "now holds 3 OME-TIFF files" in out and str(lif.parent / "f") in out
+    assert "Not converted:" in out and "f.lif: [4/5] Tiles: SKIPPED: tile scan with 3 tiles" in out
+    assert "\x1b" not in out   ## no terminal codes when the output is not a terminal

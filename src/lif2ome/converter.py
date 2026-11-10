@@ -51,14 +51,17 @@ def _time_left(seconds):
     return f"about {hours} h {minutes:02d} min left" if hours else f"about {minutes} min left"
 
 
-def _convert_one(info, tile, out):
-    """ Writes and checks one file. Returns the words for the progress line """
+def _convert_one(info, tile, out, status=lambda text: None):
+    """ Writes and checks one file. Returns the words for the progress line. status gets the step in work """
+    status("reading (step 1 of 3)")
     data, axes = reader.read_series(info, tile)
     data, axes = _ome_layout(data, axes, info.kind)
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.name + ".part")
+    status("writing (step 2 of 3)")
     write_ome(part, data, axes, info.channels, info.pixel_size, info.z_step)
     ## ponytail: the check holds the series twice in memory; compare plane by plane if a series outgrows the memory
+    status("checking the pixels (step 3 of 3)")
     if not _same_pixels(part, data, axes):
         part.replace(out.with_name(out.name + ".BAD"))
         return "FAILED the pixel check, renamed to .BAD"
@@ -72,10 +75,11 @@ def _convert_one(info, tile, out):
             f"{size}{big}, pixels match")
 
 
-def convert(path, only=None, tiles=False, out_dir=None, report=print):
+def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lambda text: None):
     """ Every series of a file as an OME-TIFF (only: that series name only). Each file is read back and compared with
     the source pixels. A file that exists is left alone, so a stopped run goes on from the next series. Returns the
-    counts {"ok", "there", "skipped", "failed"}; report gets one line per series """
+    counts {"ok", "there", "skipped", "failed"}; report gets one line per series when the series is done; status gets
+    a line each time the work on a series goes to its next step (read, write, check) """
     path = Path(path)
     jobs, counts, seen = [], {"ok": 0, "there": 0, "skipped": 0, "failed": 0}, {}
     names = reader.series_list(path)
@@ -110,7 +114,8 @@ def convert(path, only=None, tiles=False, out_dir=None, report=print):
             words, key = "already there", "there"
         else:
             try:
-                words = _convert_one(info, tile, out)
+                gb = f"{size(jobs[i - 1]) / 1e9:.2f} GB"
+                words = _convert_one(info, tile, out, lambda step: status(f"  [{i}/{len(jobs)}] {label}: {gb}, {step}"))
             except Exception as e:   ## one bad series does not stop the others
                 words = f"FAILED: {type(e).__name__}: {e}"
             key = "ok" if words.startswith("ok") else "failed"

@@ -33,14 +33,26 @@ uv add ~/dev/lif2ome
 lif2ome "/path/to/My experiment.lif"
 ```
 
-You can give more than one file. The command prints one line for each series:
+You can give more than one file. In a terminal, one line shows the step in work on the series:
+
+```
+  [2/12] Series002: 0.48 GB, writing (step 2 of 3) ...
+```
+
+When the series is done, its result takes the place of that line. At the end, a summary shows the output folder, the
+number of files in it, their size, and each series that was not converted:
 
 ```
 My experiment.lif
   [1/12] Series001: ok, CZYX (3, 15, 1024, 1024) uint8, channels ['DAPI', 'Green', 'Red'], 0.2841 µm/px, z step 1.0000 µm, 0.14 GB, pixels match, about 40 s left
   [2/12] Series002: already there
   [3/12] TileScan 1: SKIPPED: tile scan with 16 tiles, skipped; convert the merged series, or use --tiles for one file per tile
-Done: 10 converted, 1 already there, 1 skipped, 0 failed
+
+Done in 48 s: 10 converted, 1 already there, 1 skipped, 0 failed
+/path/to/My experiment
+  now holds 11 OME-TIFF files, 1.52 GB
+Not converted:
+  My experiment.lif: [3/12] TileScan 1: SKIPPED: tile scan with 16 tiles, skipped; convert the merged series, or use --tiles for one file per tile
 ```
 
 Options:
@@ -101,6 +113,7 @@ container run --rm -m 8g -v "/path/to/folder":/data lif2ome "My experiment.lif"
 ```
 
 - `-m 8g` is necessary with `container`: its default is 1 GB of memory.
+- Add `-t` after `run` to see the step in work on a series. Without `-t`, a line comes only when a series is done.
 - The command needs about 2.5 times the size of the largest series. A 4.5 GB series used 11 GB. For such a file, give
   `-m 16g`.
 - A container that has too little memory stops with no message. Run the command again with more memory; the files that
