@@ -51,8 +51,19 @@ def _time_left(seconds):
     return f"about {hours} h {minutes:02d} min left" if hours else f"about {minutes} min left"
 
 
+def _gb(n):
+    return f"{n / 1e9:.2f} GB" if n >= 1e8 else f"{n / 1e6:.1f} MB"
+
+
+def _took(seconds):
+    minutes, s = divmod(round(seconds), 60)
+    return f"{minutes} min {s:02d} s" if minutes else f"{s} s"
+
+
 def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
-    """ Writes and checks one file. Returns the words for the progress line. status gets the step in work """
+    """ Writes and checks one file. Returns (done, the words for the progress line, the details for --verbose).
+    status gets the step in work """
+    start = time.time()
     status("reading (step 1 of 3)")
     data, axes = reader.read_series(info, tile)
     data, axes = _ome_layout(data, axes, info.kind)
@@ -68,33 +79,31 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     status("checking the pixels (step 3 of 3)")
     if not _same_pixels(part, data, axes):
         part.replace(out.with_name(out.name + ".BAD"))
-        return "FAILED the pixel check, renamed to .BAD"
+        return False, "the pixel check failed, renamed to .BAD", ""
     part.replace(out)
     with tifffile.TiffFile(out) as tif:
         big = ", BigTIFF" if tif.is_bigtiff else ""
-    size = out.stat().st_size
-    size = f"{size / 1e9:.2f} GB" if size >= 1e8 else f"{size / 1e6:.1f} MB"
-    z = f", z step {info.z_step:.4f} µm" if info.z_step and "Z" in axes else ""
-    z += f", {info.time_step:.4g} s between frames" if info.time_step and "T" in axes else ""
-    z += "".join(f", {note}" for note in info.notes)
-    return (f"ok, {axes} {data.shape} {data.dtype}, channels {info.channels}, {info.pixel_size:.4f} µm/px{z}, "
-            f"{size}{big}, pixels match")
+    details = f"{axes} {data.shape} {data.dtype}, channels {info.channels}, {info.pixel_size:.4f} µm/px"
+    details += f", z step {info.z_step:.4f} µm" if info.z_step and "Z" in axes else ""
+    details += f", {info.time_step:.4g} s between frames" if info.time_step and "T" in axes else ""
+    details += "".join(f", {note}" for note in info.notes) + big
+    return True, f"{_gb(data.nbytes)} -> {_gb(out.stat().st_size)}   {_took(time.time() - start)}", details
 
 
-def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lambda text: None, metadata=None):
-    """ Every series of a file as an OME-TIFF (only: that series name only). Each file is read back and compared with
-    the source pixels. A file that exists is left alone, so a stopped run goes on from the next series. Returns the
-    counts {"ok", "there", "skipped", "failed"}; report gets one line per series when the series is done; status gets
-    a line each time the work on a series goes to its next step (read, write, check). metadata: a dict of your own
-    fields, for example {"genotype": "Ecad"}; each new file gets them. Each new file also gets the microscope settings
-    and the full Leica XML of its series; writer.read_metadata gives all three back """
+def job_bytes(job):
+    """ The size of the pixels of one job of plan(), in bytes; 0 for a series that is not converted """
+    info = job[1]
+    return int(np.prod(info.shape)) * np.dtype(info.dtype).itemsize if info is not None else 0
+
+
+def plan(path, only=None, tiles=False, out_dir=None):
+    """ The jobs of one file, one per output file: [(label, info, tile, out, error)]. A series that is not converted
+    has an error text ("SKIPPED: ..." or "FAILED: ...") and no info """
     path = Path(path)
-    jobs, counts, seen = [], {"ok": 0, "there": 0, "skipped": 0, "failed": 0}, {}
+    jobs, seen = [], {}
     names = reader.series_list(path)
     if only is not None and only not in names:
-        report(f"  FAILED: no series has the name {only!r}. Series names: {', '.join(names)}")
-        counts["failed"] = 1
-        return counts
+        return [(only, None, None, None, f"FAILED: no series has the name {only!r}. Series names: {', '.join(names)}")]
     for s, name in enumerate(names):
         seen[name] = seen.get(name, 0) + 1
         label = name if seen[name] == 1 else f"{name} ({seen[name]})"   ## two series with one name: none is lost
@@ -112,25 +121,46 @@ def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lam
         for tile in range(info.tiles) if info.tiles else [None]:
             full = label if tile is None else f"{label} - tile {tile + 1:0{width}d}"
             jobs.append((full, info, tile, out_path(path, full, out_dir), None))
-    size = lambda job: int(np.prod(job[1].shape)) * np.dtype(job[1].dtype).itemsize
-    left = sum(size(j) for j in jobs if j[1] is not None and not j[3].exists())   ## bytes still to convert
+    return jobs
+
+
+def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lambda text: None, metadata=None,
+            verbose=False, jobs=None):
+    """ Every series of a file as an OME-TIFF (only: that series name only). Each file is read back and compared with
+    the source pixels. A file that exists is left alone, so a stopped run goes on from the next series. Returns the
+    counts {"ok", "there", "skipped", "failed"}.
+
+    report gets one line when a series is done: a word (ok, there, skipped, FAILED), the series name, and the sizes
+    and the time or the reason. "ok" means written and checked. verbose adds the axes, the shape, the channels and
+    the pixel sizes to an ok line. status gets a line each time the work on a series goes to its next step.
+    metadata: a dict of your own fields, for example {"genotype": "Ecad"}; each new file gets them. Each new file
+    also gets the microscope settings and the full Leica XML of its series; writer.read_metadata gives all three back.
+    jobs: the result of plan() for this file, when the caller has it already """
+    jobs = plan(path, only, tiles, out_dir) if jobs is None else jobs
+    counts = {"ok": 0, "there": 0, "skipped": 0, "failed": 0}
+    width = min(max((len(job[0]) for job in jobs), default=0), 40)
+    line = lambda word, label, rest: f"  {word:<8}  {label:<{width}}  {rest}".rstrip()
+    left = sum(job_bytes(j) for j in jobs if j[1] is not None and not j[3].exists())   ## bytes still to convert
     done, start = 0, time.time()
-    for i, (label, info, tile, out, error) in enumerate(jobs, 1):
+    for job in jobs:
+        label, info, tile, out, error = job
         if error:
-            words, key = error, "skipped" if error.startswith("SKIPPED:") else "failed"
+            key = "skipped" if error.startswith("SKIPPED: ") else "failed"
+            word, rest = ("skipped", error.removeprefix("SKIPPED: ")) if key == "skipped" else ("FAILED", error.removeprefix("FAILED: "))
         elif out.exists():
-            words, key = "already there", "there"
+            key, word, rest = "there", "there", ""
         else:
             try:
-                gb = f"{size(jobs[i - 1]) / 1e9:.2f} GB"
-                words = _convert_one(info, tile, out, lambda step: status(f"  [{i}/{len(jobs)}] {label}: {gb}, {step}"),
-                                     metadata)
+                ok, rest, details = _convert_one(info, tile, out, lambda step: status(
+                    line("working", label, f"{_gb(job_bytes(job))}, {step}")), metadata)
             except Exception as e:   ## one bad series does not stop the others
-                words = f"FAILED: {type(e).__name__}: {e}"
-            key = "ok" if words.startswith("ok") else "failed"
-            done, left = done + size(jobs[i - 1]), left - size(jobs[i - 1])
+                ok, rest, details = False, f"{type(e).__name__}: {e}", ""
+            key, word = ("ok", "ok") if ok else ("failed", "FAILED")
+            done, left = done + job_bytes(job), left - job_bytes(job)
             if left > 0:
-                words += ", " + _time_left(left * (time.time() - start) / done)
+                rest += ", " + _time_left(left * (time.time() - start) / done)
+            if verbose and details:
+                rest += "\n" + " " * (width + 14) + details
         counts[key] += 1
-        report(f"  [{i}/{len(jobs)}] {label}: {words}")
+        report(line(word, label, rest))
     return counts

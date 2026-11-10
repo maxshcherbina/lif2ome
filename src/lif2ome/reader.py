@@ -91,7 +91,7 @@ def read_info(path, series=0, tiles=False):
         if "M" in im.dims:
             n_tiles = shape[im.dims.index("M")]
             if not tiles:
-                raise ValueError(f"tile scan with {n_tiles} tiles, skipped; convert the merged series, or use --tiles "
+                raise ValueError(f"tile scan with {n_tiles} tiles; convert the merged series, or use --tiles "
                                  "for one file per tile")
             shape = tuple(n for d, n in zip(im.dims, shape) if d != "M")
             axes = axes.replace("M", "")

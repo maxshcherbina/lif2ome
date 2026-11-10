@@ -104,9 +104,11 @@ def test_convert(fake):
     assert counts == {"ok": 3, "there": 0, "skipped": 2, "failed": 0}
     names = sorted(p.name for p in (lif.parent / "f").iterdir())
     assert names == ["f - A (2).ome.tif", "f - A.ome.tif", "f - Both.ome.tif"]
-    assert lines[0].startswith("  [1/5] A: ok, CZYX (2, 3, 8, 8) uint16") and "pixels match" in lines[0]
+    assert lines[0].split()[:2] == ["ok", "A"] and " -> " in lines[0] and "CZYX" not in lines[0]
     assert "left" in lines[0] and "left" not in lines[-1]
-    assert "SKIPPED: axes L, X" in lines[2] and "SKIPPED: tile scan with 3 tiles" in lines[3]
+    assert lines[2].split()[:2] == ["skipped", "XZ"] and "axes L, X" in lines[2]
+    assert lines[3].split()[:2] == ["skipped", "Tiles"] and "tile scan with 3 tiles" in lines[3]
+    assert lines[1].index("A (2)") == lines[0].index("A")   ## the names start in one column
     with tifffile.TiffFile(lif.parent / "f" / "f - Both.ome.tif") as tif:
         assert tif.series[0].axes == "TCZYX" and tif.series[0].shape == (2, 2, 3, 8, 8)
 
@@ -145,7 +147,7 @@ def test_failed_check_leaves_no_final_file(fake, monkeypatch, raises):
     assert lif2ome.convert(lif, only="Both", report=lines.append)["failed"] == 1
     assert not out.exists()
     if raises:
-        assert "FAILED: KeyError: 'read-back'" in lines[0]
+        assert lines[0].split()[0] == "FAILED" and "KeyError: 'read-back'" in lines[0]
     else:
         assert out.with_name(out.name + ".BAD").exists()
         assert not part.exists()
@@ -171,7 +173,7 @@ def test_bad_series_does_not_stop_conversion(fake, monkeypatch, function):
     monkeypatch.setattr(reader, function, fail)
     lines = []
     assert lif2ome.convert(lif, report=lines.append) == {"ok": 2, "there": 0, "skipped": 2, "failed": 1}
-    assert "A: FAILED: KeyError: 'MemBlock_397'" in lines[0]
+    assert lines[0].split()[:2] == ["FAILED", "A"] and "KeyError: 'MemBlock_397'" in lines[0]
     assert lif2ome.out_path(lif, "Both").exists()
 
 
@@ -188,7 +190,7 @@ def test_bad_file_does_not_stop_main(fake, monkeypatch, capsys):
     monkeypatch.setattr(reader, "series_list", series_list)
     assert lif2ome.main([str(bad), str(lif)]) == 1
     text = capsys.readouterr().out
-    assert "  FAILED: KeyError: 'MemBlock_397'" in text
+    assert "[1/2] bad.lif\n  FAILED    KeyError: 'MemBlock_397'" in text
     assert ": 3 converted, 0 already there, 2 skipped, 1 failed" in text
 
 
@@ -225,11 +227,11 @@ def test_status_and_summary(fake, capsys):
     lif2ome.convert(lif, only="Both", report=lambda line: None, status=steps.append)
     assert [s.split(", ")[-1] for s in steps] == ["reading (step 1 of 3)", "writing (step 2 of 3)",
                                                   "checking the pixels (step 3 of 3)"]
-    assert steps[0].startswith("  [1/1] Both: 0.00 GB")
+    assert steps[0].split()[:2] == ["working", "Both"]
     assert lif2ome.main([str(lif)]) == 0
     out = capsys.readouterr().out
     assert "now holds 3 OME-TIFF files" in out and str(lif.parent / "f") in out
-    assert "Not converted:" in out and "f.lif: [4/5] Tiles: SKIPPED: tile scan with 3 tiles" in out
+    assert "Not converted:" in out and "f.lif: Tiles: skipped, tile scan with 3 tiles" in out
     assert "\x1b" not in out   ## no terminal codes when the output is not a terminal
 
 
@@ -289,10 +291,12 @@ def test_folder(fake, tmp_path, capsys):
     out = capsys.readouterr().out
     made = sorted(f.relative_to(root).as_posix() for f in root.rglob("*.ome.tif"))
     assert made == ["b/b - Both.ome.tif", "sub/a/a - Both.ome.tif"]
-    assert out.index("\nsub/a.LIF\n") > out.index("b.lif\n") and "old.lif" not in out and "._a" not in out
+    assert out.index("[2/2] sub/a.LIF   1 series") > out.index("[1/2] b.lif   1 series") and "old.lif" not in out and "._a" not in out
 
     assert lif2ome.main([str(root)]) == 0   ## all series: the fake file has two that are skipped
-    assert "sub/a.LIF: [3/5] XZ: SKIPPED" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "sub/a.LIF: XZ: skipped, axes L, X" in out
+    assert "file done: 2 converted, 1 already there, 2 skipped in" in out and "Total: 10 of 10 series" in out
 
     lif2ome.main([str(root), "--only", "Both", "--out", str(tmp_path / "o")])
     assert sorted(f.relative_to(tmp_path / "o").as_posix() for f in (tmp_path / "o").rglob("*.tif")) == [
@@ -304,3 +308,19 @@ def test_empty_folder_is_not_a_failure(tmp_path, capsys):
     (tmp_path / "quiet" / "@Recycle" / "old.lif").touch()
     assert lif2ome.main([str(tmp_path / "quiet")]) == 0
     assert "no .lif files in this folder" in capsys.readouterr().out
+
+
+def test_verbose_adds_the_details(fake):
+    lif, _ = fake
+    lines = []
+    lif2ome.convert(lif, only="Both", report=lines.append, verbose=True)
+    first, details = lines[0].split("\n")
+    assert first.split()[:2] == ["ok", "Both"]
+    assert details.strip().startswith("TCZYX (2, 2, 3, 8, 8) uint16, channels ['a', 'b'], 0.1000 µm/px, z step 0.5000 µm")
+
+
+def test_one_file_has_no_total(fake, capsys):
+    lif, _ = fake
+    assert lif2ome.main([str(lif), "--only", "Both"]) == 0
+    out = capsys.readouterr().out
+    assert "[1/1] f.lif   1 series" in out and "file done: 1 converted in" in out and "Total:" not in out

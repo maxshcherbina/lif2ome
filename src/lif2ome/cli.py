@@ -1,21 +1,13 @@
 """The lif2ome command."""
 import argparse
+import re
 import sys
 import time
 from pathlib import Path
 
 from . import reader
-from .converter import convert
+from .converter import _gb, _time_left, _took, convert, job_bytes, plan
 from .writer import read_metadata
-
-
-def _size(n):
-    return f"{n / 1e9:.2f} GB" if n >= 1e8 else f"{n / 1e6:.1f} MB"
-
-
-def _took(seconds):
-    minutes, s = divmod(round(seconds), 60)
-    return f"{minutes} min {s:02d} s" if minutes else f"{s} s"
 
 
 def _inspect(path, label):
@@ -65,6 +57,8 @@ def main(argv=None):
     parser.add_argument("--meta", metavar="KEY=VALUE", action="append", default=[],
                         help="a field of your own that each new file gets, for example --meta genotype=Ecad; "
                         "give it more than one time for more fields")
+    parser.add_argument("--verbose", action="store_true", help="add the axes, the shape, the channels and the pixel "
+                        "sizes to the line of each converted series")
     parser.add_argument("--inspect", action="store_true", help="convert nothing: print the metadata of .ome.tif files "
                         "that lif2ome wrote, or the microscope settings of each series of .lif files")
     args = parser.parse_args(argv)
@@ -87,31 +81,53 @@ def main(argv=None):
 
     def report(line):
         print(clear + line, flush=True)
-        if "SKIPPED: " in line or "FAILED" in line:
-            problems.append(f"  {label}: {line.strip()}")
+        word, *rest = re.split(r"\s{2,}", line.strip(), maxsplit=2)   ## the word, the series name, the reason
+        if word in ("skipped", "FAILED"):
+            problems.append(f"  {label}: " + (f"{rest[0]}: {word}, {rest[1]}" if len(rest) == 2 else f"{word}, {' '.join(rest)}"))
 
     if not files:   ## only empty folders: nothing to do is not a failure
         return 0
+    ## the plan of every file first: the totals and the time left need all of them
+    plans = []
     for path, label in files:
-        print(label, flush=True)
         ## with --out, a file from a subfolder keeps its subfolder, so two files with one name do not collide
         out = args.out / Path(label).parent if args.out else None
         try:
-            counts = convert(path, args.only, args.tiles, out, report, status, fields)
+            plans.append((path, label, out, plan(path, args.only, args.tiles, out), None))
         except Exception as e:   ## one bad file does not stop the others
-            report(f"  FAILED: {type(e).__name__}: {e}")
+            plans.append((path, label, out, [], f"{type(e).__name__}: {e}"))
+    todo = lambda jobs: [j for j in jobs if j[1] is not None and not j[3].exists()]
+    all_series = sum(len(jobs) for *_, jobs, _ in plans)
+    bytes_left, bytes_done, series_done = sum(job_bytes(j) for *_, jobs, _ in plans for j in todo(jobs)), 0, 0
+    for k, (path, label, out, jobs, error) in enumerate(plans, 1):
+        size = sum(job_bytes(j) for j in jobs)
+        print(f"[{k}/{len(plans)}] {label}" + (f"   {len(jobs)} series, {_gb(size)}" if jobs else ""), flush=True)
+        began, mine = time.time(), sum(job_bytes(j) for j in todo(jobs))
+        if error:
+            report(f"  FAILED    {error}")
             counts = {"failed": 1}
+        else:
+            counts = convert(path, args.only, args.tiles, out, report, status, fields, args.verbose, jobs)
         for key, n in counts.items():
             total[key] = total.get(key, 0) + n
+        bytes_left, bytes_done, series_done = bytes_left - mine, bytes_done + mine, series_done + len(jobs)
+        parts = [f"{n} {word}" for word, n in (("converted", counts.get("ok", 0)), ("already there", counts.get("there", 0)),
+                                               ("skipped", counts.get("skipped", 0)), ("failed", counts.get("failed", 0))) if n]
+        end = f"  file done: {', '.join(parts) or 'nothing to do'} in {_took(time.time() - began)}."
+        if len(plans) > 1:
+            end += f"   Total: {series_done} of {all_series} series"
+            if bytes_left > 0 and bytes_done:
+                end += ", " + _time_left(bytes_left * (time.time() - start) / bytes_done)
+        print(end + "\n", flush=True)
         folder = out or path.with_suffix("")
         if folder not in folders and folder.is_dir():
             folders.append(folder)
     get = total.get
-    print(f"\nDone in {_took(time.time() - start)}: {get('ok', 0)} converted, {get('there', 0)} already there, "
+    print(f"Done in {_took(time.time() - start)}: {get('ok', 0)} converted, {get('there', 0)} already there, "
           f"{get('skipped', 0)} skipped, {get('failed', 0)} failed", flush=True)
     for folder in folders:
         files = [f for f in folder.glob("*.ome.tif") if not f.name.startswith("._")]
-        print(f"{folder}\n  now holds {len(files)} OME-TIFF files, {_size(sum(f.stat().st_size for f in files))}")
+        print(f"{folder}\n  now holds {len(files)} OME-TIFF files, {_gb(sum(f.stat().st_size for f in files))}")
     if problems:
         print("Not converted:\n" + "\n".join(problems), flush=True)
     return 1 if get("failed") else 0

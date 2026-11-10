@@ -43,23 +43,29 @@ lif2ome /path/to/folder
 While a series is being converted, a status line shows which step it is on:
 
 ```
-  [2/12] Series002: 0.48 GB, writing (step 2 of 3) ...
+  working   Series002  0.48 GB, writing (step 2 of 3) ...
 ```
 
-The result replaces that line when the series finishes. The run ends with a summary: where the files went, how many
-there are and how big, and which series were not converted.
+The result replaces that line when the series finishes. `ok` means the file was written and its pixels were checked
+against the source. Each file ends with a summary line, and the run ends with the totals, the output folders, and the
+series that were not converted:
 
 ```
-My experiment.lif
-  [1/12] Series001: ok, CZYX (3, 15, 1024, 1024) uint8, channels ['DAPI', 'Green', 'Red'], 0.2841 µm/px, z step 1.0000 µm, 0.14 GB, pixels match, about 40 s left
-  [2/12] Series002: already there
-  [3/12] TileScan 1: SKIPPED: tile scan with 16 tiles, skipped; convert the merged series, or use --tiles for one file per tile
+[1/2] My experiment.lif   3 series, 1.52 GB
+  ok        Series001   0.49 GB -> 0.14 GB   12 s, about 30 s left
+  there     Series002
+  skipped   TileScan 1  tile scan with 16 tiles; convert the merged series, or use --tiles for one file per tile
+  file done: 1 converted, 1 already there, 1 skipped in 12 s.   Total: 3 of 7 series, about 30 s left
 
-Done in 48 s: 10 converted, 1 already there, 1 skipped, 0 failed
+[2/2] Second experiment.lif   4 series, 1.94 GB
+  ok        Series001   0.49 GB -> 0.14 GB   8 s, about 24 s left
+  ...
+
+Done in 48 s: 5 converted, 1 already there, 1 skipped, 0 failed
 /path/to/My experiment
-  now holds 11 OME-TIFF files, 1.52 GB
+  now holds 2 OME-TIFF files, 0.28 GB
 Not converted:
-  My experiment.lif: [3/12] TileScan 1: SKIPPED: tile scan with 16 tiles, skipped; convert the merged series, or use --tiles for one file per tile
+  My experiment.lif: TileScan 1: skipped, tile scan with 16 tiles; convert the merged series, or use --tiles for one file per tile
 ```
 
 Options:
@@ -70,6 +76,7 @@ Options:
 | `--tiles` | Write one file per tile of a tile scan. |
 | `--out FOLDER` | Write the files to this folder. |
 | `--meta genotype=Ecad` | Store your own field in each new file. Repeat the option to add more. |
+| `--verbose` | Add the axes, the shape, the channels and the pixel sizes under each converted series. |
 | `--inspect` | Convert nothing. Print the metadata of `.ome.tif` files, or the settings of each series in a `.lif`. |
 
 ## Output files
