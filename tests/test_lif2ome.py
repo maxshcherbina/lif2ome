@@ -644,10 +644,12 @@ def test_convert_merges_a_tile_scan(fake, monkeypatch, capsys):
     monkeypatch.setattr(reader, "read_series", lambda info, tile=None: (tiles[min(tile, 8)][np.newaxis], "CYX"))
     monkeypatch.setattr(reader, "read_tile_positions", lambda path, s: nominal + [(70, 75)])
     lines = []
-    assert lif2ome.convert(lif, report=lines.append, verbose=True) == {"ok": 2, "there": 0, "skipped": 0, "failed": 0}
+    assert lif2ome.convert(lif, report=lines.append, verbose=True) == {"ok": 1, "there": 0, "skipped": 0, "failed": 0}
     assert lines[0].split()[:2] == ["ok", "Scan"] and "merged 3 x 3 tiles, overlap 25% by 25%" in lines[0]
     assert "of 20 overlaps matched" in lines[0] and "CHECK" not in lines[0]
-    assert lines[1].split()[:5] == ["ok", "Scan", "-", "tile", "10"]   ## the tile that is in no row and no column
+    assert "1 tile off the grid left out" in lines[0]   ## the tile that is in no row and no column
+    assert [f.name for f in (lif.parent / "f").iterdir()] == ["f - Scan.ome.tif"]
+    assert lif2ome.convert(lif, tiles=True, report=lambda line: None)["ok"] == 10   ## --tiles writes every tile
     merged = tifffile.imread(lif.parent / "f" / "f - Scan.ome.tif")
     x0, y0 = min(x for x, _ in true), min(y for _, y in true)
     assert np.array_equal(np.squeeze(merged)[true[4][1] - y0:true[4][1] - y0 + 64, true[4][0] - x0:true[4][0] - x0 + 64], tiles[4])

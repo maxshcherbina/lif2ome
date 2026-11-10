@@ -72,6 +72,8 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
         merged = (f"{found['columns']} x {found['rows']} tiles, overlap {found['overlap_x']:.0%} by {found['overlap_y']:.0%}; "
                   f"merged by lif2ome from the stage positions, each tile moved to fit its overlaps: "
                   f"{found['matched']} of {found['pairs']} overlaps matched, largest move {found['moved']:.0f} px")
+        if tile.get("left_out"):
+            merged += f"; {tile['left_out']} tile off the grid left out, --tiles writes it"
         if found["matched"] < found["pairs"] / 2:
             merged += "; CHECK THE MERGE: few overlaps matched"
     else:
@@ -117,7 +119,8 @@ def job_bytes(job):
 def plan(path, only=None, tiles=False, out_dir=None):
     """ The jobs of one file, one per output file: [(label, info, tile, out, error)]. A series that is not converted
     has an error text ("SKIPPED: ..." or "FAILED: ...") and no info. tile is None for a plain series, the number of
-    the tile for one tile of a tile scan, and {"tiles": [...], "positions": [...]} for a tile scan to merge.
+    the tile for one tile of a tile scan, and {"tiles": [...], "positions": [...], "left_out": n} for a tile scan to
+    merge.
 
     A tile scan is merged into one file, unless tiles is True (one file per tile) or the file already holds the merged
     image: a series whose name begins with the name of the tile scan and has "merg" in it, as LAS X names it """
@@ -149,7 +152,8 @@ def plan(path, only=None, tiles=False, out_dir=None):
                                              "file per tile") from None
                 off = stitch.grid(positions, info.shape[-2:])["off_grid"]   ## a tile in no row and no column
                 keep = [k for k in range(info.tiles) if k not in off]
-                merge, numbers = {"tiles": keep, "positions": [positions[k] for k in keep]}, off
+                ## a tile in no row and no column is not part of the picture: it is left out, and --tiles writes it
+                merge, numbers = {"tiles": keep, "positions": [positions[k] for k in keep], "left_out": len(off)}, []
         except reader.Unsupported as e:
             series_jobs = [(label, None, None, None, f"SKIPPED: {e}")]
         except Exception as e:
