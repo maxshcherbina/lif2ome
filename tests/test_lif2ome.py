@@ -242,7 +242,7 @@ def test_metadata_round_trip(fake, capsys):
     assert meta["settings"] == {"Series": "Both", "Zoom": "0.75"}
     assert meta["leica_xml"] == '<Element Name="Both"><A b="1 &lt; 2">é\n</A></Element>'
 
-    assert lif2ome.main(["--show", str(f)]) == 0
+    assert lif2ome.main(["--inspect", str(f)]) == 0
     out = capsys.readouterr().out
     assert "genotype  Ecad <Lariat>" in out and "Zoom    0.75" in out and "Leica XML: 53 characters" in out
 

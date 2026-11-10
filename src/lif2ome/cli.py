@@ -18,7 +18,7 @@ def _took(seconds):
     return f"{minutes} min {s:02d} s" if minutes else f"{s} s"
 
 
-def _show(path):
+def _inspect(path):
     """ Prints the metadata of an OME-TIFF that lif2ome wrote, or the settings of each series of a .lif file """
     print(path.name)
     if str(path).lower().endswith(".lif"):
@@ -46,16 +46,16 @@ def main(argv=None):
     parser.add_argument("--meta", metavar="KEY=VALUE", action="append", default=[],
                         help="a field of your own that each new file gets, for example --meta genotype=Ecad; "
                         "give it more than one time for more fields")
-    parser.add_argument("--show", action="store_true", help="convert nothing: print the metadata of .ome.tif files "
+    parser.add_argument("--inspect", action="store_true", help="convert nothing: print the metadata of .ome.tif files "
                         "that lif2ome wrote, or the microscope settings of each series of .lif files")
     args = parser.parse_args(argv)
     if any("=" not in pair for pair in args.meta):
         parser.error("--meta needs KEY=VALUE, for example --meta genotype=Ecad")
     fields = dict(pair.split("=", 1) for pair in args.meta)
-    if args.show:
+    if args.inspect:
         for path in args.files:
             try:
-                _show(path)
+                _inspect(path)
             except Exception as e:   ## one bad file does not stop the others
                 print(f"  FAILED: {type(e).__name__}: {e}")
         return 0

@@ -65,7 +65,7 @@ Options:
 | `--tiles` | Writes one file for each tile of a tile scan. |
 | `--out FOLDER` | Writes the files in this folder. |
 | `--meta genotype=Ecad` | Writes a field of your own into each new file. Give it again for more fields. |
-| `--show` | Converts nothing. Prints the metadata of `.ome.tif` files, or the settings of each series of `.lif` files. |
+| `--inspect` | Converts nothing. Prints the metadata of `.ome.tif` files, or the settings of each series of `.lif` files. |
 
 ## The output names
 
@@ -106,7 +106,7 @@ Each file holds three things in its OME header, so they stay with the image:
 Fiji, QuPath and OMERO show the first two as lists of key and value. To see them in the terminal:
 
 ```bash
-lif2ome --show "My experiment/My experiment - Series001.ome.tif"
+lif2ome --inspect "My experiment/My experiment - Series001.ome.tif"
 ```
 
 ```
@@ -128,7 +128,7 @@ My experiment - Series001.ome.tif
   Leica XML: 33,214 characters
 ```
 
-`lif2ome --show "My experiment.lif"` prints the same list for each series of a `.lif` file, with no conversion.
+`lif2ome --inspect "My experiment.lif"` prints the same list for each series of a `.lif` file, with no conversion.
 
 - The short list is a help for a person. When you need a setting that is not in it, read the Leica XML.
 - A detector shows no gain when the `.lif` file gives no gain for it in that sequence.
