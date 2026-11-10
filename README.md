@@ -1,19 +1,18 @@
 # lif2ome
 
-`lif2ome` converts Leica `.lif` files to OME-TIFF files.
+Convert Leica `.lif` files to OME-TIFF, one file per series, with a pixel-for-pixel check of every file written.
 
 ## What it does
 
-- It writes one OME-TIFF file for each series of a `.lif` file.
-- It keeps all channels and all pixels. The compression is zlib, which is lossless.
-- It writes the pixel size, the Z step and the channel names into each file.
-- It keeps the microscope settings: each file holds the full Leica XML of its series and a short readable list.
-- It writes fields of your own into each file, for example the genotype.
-- It reads each new file back and compares it with the pixels of the `.lif` file.
-- It leaves a file alone when the file is there already. Thus a stopped run continues from the next series.
+- Writes one OME-TIFF per series, with every channel. Compression is zlib, so no pixel value changes.
+- Stores the pixel size, the Z step and the channel names in each file.
+- Keeps the microscope settings: each file carries the full Leica XML of its series, plus a short summary you can read.
+- Stores your own fields in each file, such as the genotype.
+- Reads every new file back and compares it with the pixels in the `.lif`.
+- Skips files that already exist, so an interrupted run picks up at the next series.
 
-The files are standard OME-TIFF. `tifffile` and `bioio` open them; both are tested. Fiji, napari and QuPath read this
-format, but no test has opened a `lif2ome` file in them yet.
+The output is standard OME-TIFF. It has been opened with `tifffile` and `bioio`. Fiji, napari and QuPath read the
+format too, but nobody has tried a `lif2ome` file in them yet.
 
 ## Install
 
@@ -23,7 +22,7 @@ You need [uv](https://docs.astral.sh/uv/).
 uv tool install git+https://github.com/maxshcherbina/lif2ome
 ```
 
-In a project of your own, add it as a library:
+To use it as a library in your own project:
 
 ```bash
 uv add git+https://github.com/maxshcherbina/lif2ome
@@ -35,14 +34,14 @@ uv add git+https://github.com/maxshcherbina/lif2ome
 lif2ome "/path/to/My experiment.lif"
 ```
 
-You can give more than one file. In a terminal, one line shows the step in work on the series:
+You can pass several files. While a series is being converted, a status line shows which step it is on:
 
 ```
   [2/12] Series002: 0.48 GB, writing (step 2 of 3) ...
 ```
 
-When the series is done, its result takes the place of that line. At the end, a summary shows the output folder, the
-number of files in it, their size, and each series that was not converted:
+The result replaces that line when the series finishes. The run ends with a summary: where the files went, how many
+there are and how big, and which series were not converted.
 
 ```
 My experiment.lif
@@ -61,15 +60,15 @@ Options:
 
 | Option | What it does |
 |---|---|
-| `--only "Series003"` | Converts the series with this name only. |
-| `--tiles` | Writes one file for each tile of a tile scan. |
-| `--out FOLDER` | Writes the files in this folder. |
-| `--meta genotype=Ecad` | Writes a field of your own into each new file. Give it again for more fields. |
-| `--inspect` | Converts nothing. Prints the metadata of `.ome.tif` files, or the settings of each series of `.lif` files. |
+| `--only "Series003"` | Convert only the series with this name. |
+| `--tiles` | Write one file per tile of a tile scan. |
+| `--out FOLDER` | Write the files to this folder. |
+| `--meta genotype=Ecad` | Store your own field in each new file. Repeat the option to add more. |
+| `--inspect` | Convert nothing. Print the metadata of `.ome.tif` files, or the settings of each series in a `.lif`. |
 
-## The output names
+## Output names
 
-The files go in a folder that has the name of the `.lif` file, beside the `.lif` file:
+Files go in a folder named after the `.lif`, next to it:
 
 ```
 My experiment.lif
@@ -79,11 +78,11 @@ My experiment/
     My experiment - TileScan 1 - tile 01.ome.tif     (with --tiles only)
 ```
 
-- These characters in a series name become `_`: `< > : " / \ | ? *`.
-- When two series have one name, the second file gets ` (2)` after the name.
-- A file that fails the pixel check gets the name `... .ome.tif.BAD`.
+- Characters that are not allowed in file names (`< > : " / \ | ? *`) become `_`.
+- If two series share a name, the second file gets ` (2)` appended.
+- A file that fails the pixel check is renamed to end in `.ome.tif.BAD`.
 
-## What is in a file
+## Axes and channel names
 
 | Series | Axes in the file |
 |---|---|
@@ -91,19 +90,20 @@ My experiment/
 | A movie | `CTYX` |
 | A movie of stacks | `TCZYX` |
 
-A channel name is the dye name when the `.lif` file has one. If not, it is the colour of the channel in LAS X (for
-example `Green`). If the file has no colour, it is `Channel 1`, `Channel 2`.
+A channel is named after its dye if the `.lif` records one. Otherwise it takes the channel colour from LAS X, such as
+`Green`. With neither, it is `Channel 1`, `Channel 2`, and so on.
 
-## The metadata in a file
+## Metadata
 
-Each file holds three things in its OME header, so they stay with the image:
+Three things are stored in the OME header of each file, so they travel with the image:
 
-1. **Your fields.** You give them with `--meta KEY=VALUE`, or with `metadata={...}` in Python.
-2. **The microscope settings, as a short readable list.** The objective, the zoom, the pinhole, the scan speed, the
-   averages, and the lasers and detectors of each scan sequence.
-3. **The full Leica XML of the series.** It has every setting that the `.lif` file holds for the series.
+1. **Your fields.** Set them with `--meta KEY=VALUE`, or with `metadata={...}` in Python.
+2. **A summary of the microscope settings.** Objective, zoom, pinhole, scan speed, averaging, and the lasers and
+   detectors of each scan sequence.
+3. **The full Leica XML of the series.** Everything the `.lif` records about that series.
 
-Fiji, QuPath and OMERO show the first two as lists of key and value. To see them in the terminal:
+The first two are OME map annotations, which Fiji, QuPath and OMERO display as key-value tables. To print them in a
+terminal:
 
 ```bash
 lif2ome --inspect "My experiment/My experiment - Series001.ome.tif"
@@ -128,17 +128,18 @@ My experiment - Series001.ome.tif
   Leica XML: 33,214 characters
 ```
 
-`lif2ome --inspect "My experiment.lif"` prints the same list for each series of a `.lif` file, with no conversion.
+`lif2ome --inspect "My experiment.lif"` prints the same summary for every series in a `.lif`, without converting anything.
 
-- The short list is a help for a person. When you need a setting that is not in it, read the Leica XML.
-- A detector shows no gain when the `.lif` file gives no gain for it in that sequence.
-- A file that is there already is left alone, so it gets no new metadata. Delete the file and run the command again.
+- The summary covers the settings people usually ask about. For anything else, read the Leica XML.
+- A detector is listed without a gain when the `.lif` records none for that sequence.
+- Existing files are skipped, so they keep whatever metadata they had. To add metadata to one, delete it and run the
+  command again.
 
 ## In a container
 
-The `Dockerfile` makes an image that runs the command. Mount the folder that holds the `.lif` files at `/data`.
+The `Dockerfile` builds an image that runs the command. Mount the folder with your `.lif` files at `/data`.
 
-Build the image one time, in this folder:
+Build the image once, from this folder:
 
 ```bash
 docker build -t lif2ome .
@@ -150,21 +151,22 @@ Run it:
 docker run --rm -v "/path/to/folder":/data lif2ome "My experiment.lif"
 ```
 
-On a Mac with Apple's `container` tool, the commands are `container build -t lif2ome .` and:
+With Apple's `container` tool on a Mac, build with `container build -t lif2ome .` and run:
 
 ```bash
 container run --rm -m 8g -v "/path/to/folder":/data lif2ome "My experiment.lif"
 ```
 
-- `-m 8g` is necessary with `container`: its default is 1 GB of memory.
-- Add `-t` after `run` to see the step in work on a series. Without `-t`, a line comes only when a series is done.
-- The command needs about 2.5 times the size of the largest series. A 4.5 GB series used 11 GB. For such a file, give
-  `-m 16g`.
-- A container that has too little memory stops with no message. Run the command again with more memory; the files that
-  are there stay.
-- An image built on an Apple silicon Mac is for ARM chips. On a PC with an Intel or AMD chip, build the image on that PC.
+- `container` gives a container 1 GB of memory by default, so `-m 8g` is required.
+- Conversion needs about 2.5 times the size of the largest series in memory. A 4.5 GB series peaked at 11 GB; use
+  `-m 16g` for files like that.
+- A container that runs out of memory stops without an error message. Run it again with more memory. Finished files
+  are kept.
+- Add `-t` after `run` to see the status line. Without it, output appears only when a series finishes.
+- An image built on an Apple silicon Mac only runs on ARM. Build on the machine that will run it, or pass
+  `--arch amd64` to `container build` for Intel and AMD machines.
 
-What is tested: the `container` commands, on an Apple silicon Mac. The `docker` commands have no test yet. Apptainer has no test yet.
+Only the `container` commands have been run, on an Apple silicon Mac. The `docker` commands and Apptainer are untested.
 
 ## In Python
 
@@ -175,21 +177,21 @@ lif2ome.series_list("file.lif")                 # the names of the series
 info = lif2ome.read_info("file.lif", 0)         # axes, shape, channels, pixel_size and z_step in µm
 data, axes = lif2ome.read_series(info)          # the pixels, axes in the order T, C, Z, Y, X
 lif2ome.write_ome("out.ome.tif", data, axes, info.channels, info.pixel_size, info.z_step)
-lif2ome.convert("file.lif", metadata={"genotype": "Ecad"})   # the whole file, as the command does
+lif2ome.convert("file.lif", metadata={"genotype": "Ecad"})   # a whole file, like the command
 
 meta = lif2ome.read_metadata("out.ome.tif")    # {"fields": {...}, "settings": {...}, "leica_xml": "..."}
-lif2ome.read_settings("file.lif", 0)           # the short readable list of one series
+lif2ome.read_settings("file.lif", 0)           # the settings summary of one series
 lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one series
 ```
 
 ## Limits
 
-- A tile scan is skipped unless you give `--tiles`. LAS X usually saves the merged image as one more series.
-- A cross-section (an XZ scan) is skipped.
-- The command needs memory of about 2.5 times the size of the largest series, for the pixel check.
+- Tile scans are skipped unless you pass `--tiles`, and `--tiles` writes the tiles separately without stitching them.
+  LAS X usually saves the merged image as another series in the same file.
+- Cross-sections (XZ scans) are skipped.
+- A whole series is held in memory, plus a second copy for the pixel check.
 - The time between frames of a movie is not written.
-- `--tiles` writes the tiles as they are. It does not merge them.
-- A `.czi` file works only with the extra `lif2ome[czi]` (bioio). This has no test with a real file.
+- `.czi` files need the `lif2ome[czi]` extra, which uses bioio. That path has never been run on a real file.
 
 ## Tests
 
@@ -197,7 +199,7 @@ lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one serie
 uv run pytest
 ```
 
-The tests need no microscope file. To test a real file also:
+The tests run without a microscope file. To include a real one:
 
 ```bash
 LIF2OME_TEST_LIF="/path/to/file.lif" uv run pytest -s
