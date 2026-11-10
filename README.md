@@ -7,6 +7,8 @@
 - It writes one OME-TIFF file for each series of a `.lif` file.
 - It keeps all channels and all pixels. The compression is zlib, which is lossless.
 - It writes the pixel size, the Z step and the channel names into each file.
+- It keeps the microscope settings: each file holds the full Leica XML of its series and a short readable list.
+- It writes fields of your own into each file, for example the genotype.
 - It reads each new file back and compares it with the pixels of the `.lif` file.
 - It leaves a file alone when the file is there already. Thus a stopped run continues from the next series.
 
@@ -62,6 +64,8 @@ Options:
 | `--only "Series003"` | Converts the series with this name only. |
 | `--tiles` | Writes one file for each tile of a tile scan. |
 | `--out FOLDER` | Writes the files in this folder. |
+| `--meta genotype=Ecad` | Writes a field of your own into each new file. Give it again for more fields. |
+| `--show` | Converts nothing. Prints the metadata of `.ome.tif` files, or the settings of each series of `.lif` files. |
 
 ## The output names
 
@@ -89,6 +93,46 @@ My experiment/
 
 A channel name is the dye name when the `.lif` file has one. If not, it is the colour of the channel in LAS X (for
 example `Green`). If the file has no colour, it is `Channel 1`, `Channel 2`.
+
+## The metadata in a file
+
+Each file holds three things in its OME header, so they stay with the image:
+
+1. **Your fields.** You give them with `--meta KEY=VALUE`, or with `metadata={...}` in Python.
+2. **The microscope settings, as a short readable list.** The objective, the zoom, the pinhole, the scan speed, the
+   averages, and the lasers and detectors of each scan sequence.
+3. **The full Leica XML of the series.** It has every setting that the `.lif` file holds for the series.
+
+Fiji, QuPath and OMERO show the first two as lists of key and value. To see them in the terminal:
+
+```bash
+lif2ome --show "My experiment/My experiment - Series001.ome.tif"
+```
+
+```
+My experiment - Series001.ome.tif
+  Your fields
+    genotype  Ecad
+  Microscope settings
+    Source file            My experiment.lif
+    Series                 Series001
+    Acquired               2026-10-26 20:07:35
+    Microscope             TCS SP8 DMI8-CS
+    Objective              HC PL APO CS2 40x/1.30 OIL
+    Zoom                   0.75
+    Pinhole (Airy units)   1
+    Seq. 1: Laser 488 nm (%)    1
+    Seq. 1: Detector HyD 2      gain 100, offset -0.00667, 493 to 547 nm, Leica/EGFP
+    Seq. 2: Laser 552 nm (%)    3
+    Seq. 2: Detector HyD 4      560.4 to 619.9 nm
+  Leica XML: 33,214 characters
+```
+
+`lif2ome --show "My experiment.lif"` prints the same list for each series of a `.lif` file, with no conversion.
+
+- The short list is a help for a person. When you need a setting that is not in it, read the Leica XML.
+- A detector shows no gain when the `.lif` file gives no gain for it in that sequence.
+- A file that is there already is left alone, so it gets no new metadata. Delete the file and run the command again.
 
 ## In a container
 
@@ -131,7 +175,11 @@ lif2ome.series_list("file.lif")                 # the names of the series
 info = lif2ome.read_info("file.lif", 0)         # axes, shape, channels, pixel_size and z_step in µm
 data, axes = lif2ome.read_series(info)          # the pixels, axes in the order T, C, Z, Y, X
 lif2ome.write_ome("out.ome.tif", data, axes, info.channels, info.pixel_size, info.z_step)
-lif2ome.convert("file.lif")                     # the whole file, as the command does
+lif2ome.convert("file.lif", metadata={"genotype": "Ecad"})   # the whole file, as the command does
+
+meta = lif2ome.read_metadata("out.ome.tif")    # {"fields": {...}, "settings": {...}, "leica_xml": "..."}
+lif2ome.read_settings("file.lif", 0)           # the short readable list of one series
+lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one series
 ```
 
 ## Limits

@@ -6,6 +6,7 @@ bioio-czi are installed; that path has no test with a real file.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
+from xml.etree import ElementTree
 
 import liffile
 import numpy as np
@@ -146,6 +147,99 @@ def read_part(info, channels, frames=None, crop=None, tile=None):
     if crop is not None:
         data = data[:, :, crop[0]:crop[1], crop[2]:crop[3]]
     return np.ascontiguousarray(data)
+
+
+def read_xml(path, series=0):
+    """ The Leica XML of one series, as text: every setting the .lif file holds for it. "" for a file that is not .lif """
+    if not _is_lif(path):
+        return ""
+    with _lif_image(str(path), series) as im:
+        return ElementTree.tostring(im.xml_element, encoding="unicode")
+
+
+def read_settings(path, series=0):
+    """ The main microscope settings of one series in readable form, a dict of label and text, for example
+    {"Objective": "HC PL APO CS2 40x/1.30 OIL", "Zoom": "0.75", "Laser 488 nm (%)": "1"}. The Leica XML (read_xml) has
+    all settings; this is the short list a person reads """
+    out = {"Source file": Path(path).name}
+    if not _is_lif(path):
+        return out
+    with _lif_image(str(path), series) as im:
+        out["Series"] = im.name
+        ## ponytail: the XML differs between microscopes and LAS X versions, so a part that is absent or odd is left
+        ## out of the short list; the full XML is in the file in every case
+        try:
+            _lif_settings(im, out)
+        except Exception as e:
+            out["Note"] = f"the short list is not complete ({type(e).__name__}: {e}); see the Leica XML"
+    return out
+
+
+def _num(text, digits=3, scale=1.0):
+    """ A number of the XML as short text: 0.999614337196571 gives 1, 6.52917E-05 with scale 1e6 gives 65.3 """
+    return f"{float(text) * scale:.{digits}g}"
+
+
+def _lif_settings(im, out):
+    stamps = im.timestamps
+    if stamps is not None and len(stamps):
+        out["Acquired"] = str(stamps[0]).split(".")[0].replace("T", " ")
+    hw = im.xml_element.find('./Data/Image/Attachment[@Name="HardwareSetting"]')
+    if hw is None:
+        return
+    conf = hw.find("ATLConfocalSettingDefinition")
+    c = conf.attrib if conf is not None else {}
+
+    def put(label, text):
+        if text not in (None, ""):
+            out[label] = " ".join(str(text).split())
+
+    put("Microscope", f"{hw.attrib.get('SystemTypeName', '')} {c.get('MicroscopeModel', '')}")
+    put("Software", hw.attrib.get("Software"))
+    put("Objective", c.get("ObjectiveName"))
+    for label, key in (("Magnification", "Magnification"), ("Numerical aperture", "NumericalAperture"),
+                       ("Immersion", "Immersion"), ("Refraction index", "RefractionIndex"), ("Zoom", "Zoom"),
+                       ("Scan mode", "ScanMode"), ("Scan speed (Hz)", "ScanSpeed"),
+                       ("Scan direction", "ScanDirectionXName"), ("Line average", "LineAverage"),
+                       ("Frame average", "FrameAverage"), ("Line accumulation", "Line_Accumulation"),
+                       ("Frame accumulation", "FrameAccumulation")):
+        put(label, c.get(key))
+    if c.get("PinholeAiry"):
+        put("Pinhole (Airy units)", _num(c["PinholeAiry"]))
+    if c.get("Pinhole"):
+        put("Pinhole (µm)", _num(c["Pinhole"], scale=1e6))
+    if c.get("PixelDwellTime"):
+        put("Pixel dwell time (µs)", _num(c["PixelDwellTime"], scale=1e6))
+    if conf is None:
+        return
+    ## a sequential scan has one block per sequence, which holds only what differs from the master block of the scan:
+    ## a detector gain that the sequence block does not give comes from the master block when the detector is active there
+    master = hw.find("LDM_Block_Sequential/LDM_Block_Sequential_Master/ATLConfocalSettingDefinition")
+    master = conf if master is None else master
+    blocks = hw.findall("LDM_Block_Sequential/LDM_Block_Sequential_List/ATLConfocalSettingDefinition")
+    active = {d.attrib.get("Name"): d.attrib for d in master.iter("Detector") if d.attrib.get("IsActive") == "1"}
+    master_bands = {b.attrib.get("Channel"): b.attrib for b in master.iter("MultiBand")}
+    for n, block in enumerate(blocks or [master], 1):
+        first = f"{block.attrib.get('UserSettingName') or f'Seq. {n}'}: " if blocks else ""
+        lasers = {}
+        for line in block.iter("LaserLineSetting"):   ## the lines in use: an intensity above 0
+            if float(line.attrib.get("IntensityDev", 0)) > 0:
+                lasers.setdefault(line.attrib.get("LaserLine", "?"), []).append(_num(line.attrib["IntensityDev"]))
+        for line, values in lasers.items():
+            put(f"{first}Laser {line} nm (%)", " / ".join(dict.fromkeys(values)))
+        bands = {b.attrib.get("Channel"): b.attrib for b in block.iter("MultiBand")} or master_bands
+        for det in block.iter("Detector"):
+            d = det.attrib
+            if d.get("IsActive") != "1":
+                continue
+            d = {**active.get(d.get("Name"), {}), **d}
+            words = [f"{word} {_num(d[key])}" for word, key in (("gain", "Gain"), ("offset", "Offset")) if d.get(key)]
+            band = bands.get(d.get("Channel"), {})
+            if band.get("LeftWorld") and band.get("RightWorld"):
+                words.append(f"{_num(band['LeftWorld'], 4)} to {_num(band['RightWorld'], 4)} nm")
+            if band.get("DyeName"):
+                words.append(band["DyeName"])
+            put(f"{first}Detector {d.get('Name', d.get('Channel', '?'))}", ", ".join(words) or "active")
 
 
 ## .lif: liffile

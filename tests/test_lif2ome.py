@@ -92,6 +92,8 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(reader, "series_list", lambda path: [v[0] for v in series.values()])
     monkeypatch.setattr(reader, "read_info", read_info)
     monkeypatch.setattr(reader, "read_series", read_series)
+    monkeypatch.setattr(reader, "read_settings", lambda path, s: {"Series": series[s][0], "Zoom": "0.75"})
+    monkeypatch.setattr(reader, "read_xml", lambda path, s: f'<Element Name="{series[s][0]}"><A b="1 &lt; 2">é\n</A></Element>')
     return tmp_path / "f.lif", reads
 
 
@@ -229,3 +231,31 @@ def test_status_and_summary(fake, capsys):
     assert "now holds 3 OME-TIFF files" in out and str(lif.parent / "f") in out
     assert "Not converted:" in out and "f.lif: [4/5] Tiles: SKIPPED: tile scan with 3 tiles" in out
     assert "\x1b" not in out   ## no terminal codes when the output is not a terminal
+
+
+def test_metadata_round_trip(fake, capsys):
+    lif, _ = fake
+    lif2ome.convert(lif, only="Both", report=lambda line: None, metadata={"genotype": "Ecad <Lariat>", "trial": 1})
+    f = lif.parent / "f" / "f - Both.ome.tif"
+    meta = lif2ome.read_metadata(f)
+    assert meta["fields"] == {"genotype": "Ecad <Lariat>", "trial": "1"}
+    assert meta["settings"] == {"Series": "Both", "Zoom": "0.75"}
+    assert meta["leica_xml"] == '<Element Name="Both"><A b="1 &lt; 2">é\n</A></Element>'
+
+    assert lif2ome.main(["--show", str(f)]) == 0
+    out = capsys.readouterr().out
+    assert "genotype  Ecad <Lariat>" in out and "Zoom    0.75" in out and "Leica XML: 53 characters" in out
+
+
+def test_file_without_metadata(tmp_path):
+    f = tmp_path / "x.ome.tif"
+    lif2ome.write_ome(f, stack(), "CZYX")
+    assert lif2ome.read_metadata(f) == {"fields": {}, "settings": {}, "leica_xml": ""}
+
+
+def test_meta_option(fake, capsys):
+    lif, _ = fake
+    assert lif2ome.main([str(lif), "--only", "Both", "--meta", "genotype=Ecad", "--meta", "note=a=b"]) == 0
+    assert lif2ome.read_metadata(lif.parent / "f" / "f - Both.ome.tif")["fields"] == {"genotype": "Ecad", "note": "a=b"}
+    with pytest.raises(SystemExit):
+        lif2ome.main([str(lif), "--meta", "genotype"])

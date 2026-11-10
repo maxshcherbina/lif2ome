@@ -51,7 +51,7 @@ def _time_left(seconds):
     return f"about {hours} h {minutes:02d} min left" if hours else f"about {minutes} min left"
 
 
-def _convert_one(info, tile, out, status=lambda text: None):
+def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     """ Writes and checks one file. Returns the words for the progress line. status gets the step in work """
     status("reading (step 1 of 3)")
     data, axes = reader.read_series(info, tile)
@@ -59,7 +59,8 @@ def _convert_one(info, tile, out, status=lambda text: None):
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.name + ".part")
     status("writing (step 2 of 3)")
-    write_ome(part, data, axes, info.channels, info.pixel_size, info.z_step)
+    write_ome(part, data, axes, info.channels, info.pixel_size, info.z_step, metadata,
+              reader.read_settings(info.path, info.series), reader.read_xml(info.path, info.series))
     ## ponytail: the check holds the series twice in memory; compare plane by plane if a series outgrows the memory
     status("checking the pixels (step 3 of 3)")
     if not _same_pixels(part, data, axes):
@@ -75,11 +76,13 @@ def _convert_one(info, tile, out, status=lambda text: None):
             f"{size}{big}, pixels match")
 
 
-def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lambda text: None):
+def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lambda text: None, metadata=None):
     """ Every series of a file as an OME-TIFF (only: that series name only). Each file is read back and compared with
     the source pixels. A file that exists is left alone, so a stopped run goes on from the next series. Returns the
     counts {"ok", "there", "skipped", "failed"}; report gets one line per series when the series is done; status gets
-    a line each time the work on a series goes to its next step (read, write, check) """
+    a line each time the work on a series goes to its next step (read, write, check). metadata: a dict of your own
+    fields, for example {"genotype": "Ecad"}; each new file gets them. Each new file also gets the microscope settings
+    and the full Leica XML of its series; writer.read_metadata gives all three back """
     path = Path(path)
     jobs, counts, seen = [], {"ok": 0, "there": 0, "skipped": 0, "failed": 0}, {}
     names = reader.series_list(path)
@@ -115,7 +118,8 @@ def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lam
         else:
             try:
                 gb = f"{size(jobs[i - 1]) / 1e9:.2f} GB"
-                words = _convert_one(info, tile, out, lambda step: status(f"  [{i}/{len(jobs)}] {label}: {gb}, {step}"))
+                words = _convert_one(info, tile, out, lambda step: status(f"  [{i}/{len(jobs)}] {label}: {gb}, {step}"),
+                                     metadata)
             except Exception as e:   ## one bad series does not stop the others
                 words = f"FAILED: {type(e).__name__}: {e}"
             key = "ok" if words.startswith("ok") else "failed"
