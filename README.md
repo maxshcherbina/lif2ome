@@ -2,7 +2,7 @@
 
 Convert Leica `.lif` files to OME-TIFF, one file per series, with a pixel-for-pixel check of every file written.
 
-## What it does
+## Features
 
 - Writes one OME-TIFF per series, with every channel. Compression is zlib, so no pixel value changes.
 - Stores the pixel size, the Z step and the channel names in each file.
@@ -14,7 +14,7 @@ Convert Leica `.lif` files to OME-TIFF, one file per series, with a pixel-for-pi
 The output is standard OME-TIFF. It has been opened with `tifffile` and `bioio`. Fiji, napari and QuPath read the
 format too, but nobody has tried a `lif2ome` file in them yet.
 
-## Install
+## Installation
 
 You need [uv](https://docs.astral.sh/uv/).
 
@@ -28,7 +28,7 @@ To use it as a library in your own project:
 uv add git+https://github.com/maxshcherbina/lif2ome
 ```
 
-## The command
+## Usage
 
 ```bash
 lif2ome "/path/to/My experiment.lif"
@@ -66,7 +66,7 @@ Options:
 | `--meta genotype=Ecad` | Store your own field in each new file. Repeat the option to add more. |
 | `--inspect` | Convert nothing. Print the metadata of `.ome.tif` files, or the settings of each series in a `.lif`. |
 
-## Output names
+## Output files
 
 Files go in a folder named after the `.lif`, next to it:
 
@@ -82,7 +82,7 @@ My experiment/
 - If two series share a name, the second file gets ` (2)` appended.
 - A file that fails the pixel check is renamed to end in `.ome.tif.BAD`.
 
-## Axes and channel names
+### Axes and channel names
 
 | Series | Axes in the file |
 |---|---|
@@ -135,7 +135,7 @@ My experiment - Series001.ome.tif
 - Existing files are skipped, so they keep whatever metadata they had. To add metadata to one, delete it and run the
   command again.
 
-## In a container
+## Docker
 
 The `Dockerfile` builds an image that runs the command. Mount the folder with your `.lif` files at `/data`.
 
@@ -168,7 +168,7 @@ container run --rm -m 8g -v "/path/to/folder":/data lif2ome "My experiment.lif"
 
 Only the `container` commands have been run, on an Apple silicon Mac. The `docker` commands and Apptainer are untested.
 
-## In Python
+## Python API
 
 ```python
 import lif2ome
@@ -184,7 +184,7 @@ lif2ome.read_settings("file.lif", 0)           # the settings summary of one ser
 lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one series
 ```
 
-## Limits
+## Limitations
 
 - Tile scans are skipped unless you pass `--tiles`, and `--tiles` writes the tiles separately without stitching them.
   LAS X usually saves the merged image as another series in the same file.
@@ -193,7 +193,7 @@ lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one serie
 - The time between frames of a movie is not written.
 - `.czi` files need the `lif2ome[czi]` extra, which uses bioio. That path has never been run on a real file.
 
-## Tests
+## Development
 
 ```bash
 uv run pytest
