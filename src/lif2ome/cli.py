@@ -54,7 +54,8 @@ def main(argv=None):
     parser.add_argument("files", nargs="+", type=Path, help="one or more .lif files, or folders: a folder stands for "
                         "every .lif file in it and in its subfolders")
     parser.add_argument("--only", metavar="SERIES", help="convert the series with this name only")
-    parser.add_argument("--tiles", action="store_true", help="write one file per tile of a tile scan")
+    parser.add_argument("--tiles", action="store_true", help="write one file per tile of a tile scan; without this, an "
+                        "unmerged tile scan is merged into one file")
     parser.add_argument("--out", metavar="FOLDER", type=Path, help="write the files in this folder")
     parser.add_argument("--meta", metavar="KEY=VALUE", action="append", default=[],
                         help="a field of your own that each new file gets, for example --meta genotype=Ecad; "

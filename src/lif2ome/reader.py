@@ -120,6 +120,24 @@ def cross_section_axes(axes):
     return axes, False
 
 
+def read_tile_positions(path, series=0):
+    """ The (x, y) of each tile of a tile scan, in pixels, as the stage gave them: tile k of the series is entry k.
+    Raises Unsupported when the file does not give a position for each tile """
+    with _lif_image(str(path), series) as im:
+        scan = im.xml_element.find('./Data/Image/Attachment[@Name="TileScanInfo"]')
+        tiles = scan.findall("Tile") if scan is not None else []
+        if "M" not in im.dims or len(tiles) != im.shape[im.dims.index("M")]:
+            raise Unsupported("the file gives no stage position for each tile")
+        ## ponytail: no file with a flipped or swapped scan was at hand, so such a scan is not merged; read the flags
+        ## here when one turns up
+        if any(scan.attrib.get(flag, "0") != "0" for flag in ("FlipX", "FlipY", "SwapXY")):
+            raise Unsupported("the tiles are flipped or swapped against the stage axes")
+        x, y = _lif_step(im.coords, "X"), _lif_step(im.coords, "Y")
+        if not x or not y:
+            raise Unsupported("the file gives no pixel size")
+        return [(float(t.attrib["PosX"]) / x, float(t.attrib["PosY"]) / y) for t in tiles]
+
+
 def read_series(info, tile=None):
     """ (data, axes): all the pixels of one series, the axes in OME order (T, C, Z, Y, X; an axis the series does not
     have is absent). tile: the tile to read of a tile scan, counted from 0 """

@@ -8,7 +8,7 @@ import pytest
 import tifffile
 
 import lif2ome
-from lif2ome import converter, reader
+from lif2ome import converter, reader, stitch
 
 
 def stack(shape=(2, 3, 8, 8), dtype=np.uint16):
@@ -92,6 +92,10 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(reader, "series_list", lambda path: [v[0] for v in series.values()])
     monkeypatch.setattr(reader, "read_info", read_info)
     monkeypatch.setattr(reader, "read_series", read_series)
+    def no_positions(path, s):
+        raise reader.Unsupported("the file gives no stage position for each tile")
+
+    monkeypatch.setattr(reader, "read_tile_positions", no_positions)
     monkeypatch.setattr(reader, "read_settings", lambda path, s: {"Series": series[s][0], "Zoom": "0.75"})
     monkeypatch.setattr(reader, "read_xml", lambda path, s: f'<Element Name="{series[s][0]}"><A b="1 &lt; 2">é\n</A></Element>')
     return tmp_path / "f.lif", reads
@@ -574,3 +578,79 @@ def test_plan_tile_label_collision(fake, monkeypatch):
     jobs = converter.plan(lif, tiles=True)
     assert [j[0] for j in jobs] == ['Tiles - tile 01', 'Tiles - tile 02', 'Tiles - tile 03', 'Tiles - tile 01 (2)']
     assert converter.plan(lif, only='Tiles - tile 01 (2)', tiles=True) == [jobs[-1]]
+
+
+def scene_and_tiles(jitter=True):
+    """ A picture with texture, cut into 3 x 3 tiles of 64 px with an overlap of 16 px. The true place of a tile is
+    off from the place "the stage gives" by a few pixels, in the other direction on each second row """
+    rng = np.random.default_rng(0)
+    scene = (rng.random((220, 220)) * 255).astype(np.uint8)
+    nominal, true = [], []
+    for row in range(3):
+        for col in range(3):
+            nominal.append((col * 48, row * 48))
+            dx = (5 if row % 2 else -4) if jitter else 0
+            true.append((col * 48 + 8 + dx, row * 48 + 8 + (row if jitter else 0)))
+    tiles = [scene[y:y + 64, x:x + 64] for x, y in true]
+    return scene, nominal, true, tiles
+
+
+def test_grid_reads_the_overlap_and_the_odd_tile():
+    _, nominal, _, _ = scene_and_tiles()
+    found = stitch.grid(nominal + [(70, 75)], (64, 64))
+    assert (found["columns"], found["rows"], found["off_grid"]) == (3, 3, [9])
+    assert found["overlap_x"] == pytest.approx(0.25) and found["overlap_y"] == pytest.approx(0.25)
+    assert stitch.grid([(0, 0), (90, 0)], (100, 100))["overlap_x"] == pytest.approx(0.10)
+
+
+def test_merge_moves_each_tile_to_fit_its_overlaps():
+    scene, nominal, true, tiles = scene_and_tiles()
+    data, found = stitch.merge(nominal, lambda k: tiles[k][np.newaxis])   ## one channel
+    assert found["pairs"] == 20 and found["matched"] >= 12 and found["moved"] > 3   ## 12 pairs side by side, 8 at a corner
+    x0, y0 = min(x for x, _ in true), min(y for _, y in true)
+    for (x, y), tile in zip(true, tiles):   ## each tile lies where the scene has it
+        assert np.array_equal(data[0, y - y0:y - y0 + 64, x - x0:x - x0 + 64], tile)
+
+    ## with the stage positions only, the tiles would lie in the wrong place
+    fitted, _, _ = stitch.place(nominal, [t.astype(np.float32) for t in tiles])
+    assert not np.array_equal(fitted, np.array(nominal))
+
+
+def test_merge_keeps_the_stage_positions_when_nothing_matches():
+    rng = np.random.default_rng(1)
+    tiles = [(rng.random((64, 64)) * 255).astype(np.uint8) for _ in range(4)]   ## four pictures with nothing in common
+    nominal = [(0, 0), (48, 0), (0, 48), (48, 48)]
+    data, found = stitch.merge(nominal, lambda k: tiles[k])
+    assert found["matched"] == 0 and found["pairs"] == 6 and data.shape == (112, 112)
+    assert np.array_equal(data[48:, 48:], tiles[3])
+
+
+def test_convert_merges_a_tile_scan(fake, monkeypatch, capsys):
+    lif, reads = fake
+    scene, nominal, true, tiles = scene_and_tiles()
+    info = lif2ome.ImageInfo(str(lif), "CYX", (1, 64, 64), "image", ["a"], series_name="Scan", dtype="uint8",
+                             pixel_size=0.5, tiles=10)
+    monkeypatch.setattr(reader, "series_list", lambda path: ["Scan"])
+    monkeypatch.setattr(reader, "read_info", lambda path, s, tiles=False: info)
+    monkeypatch.setattr(reader, "read_series", lambda info, tile=None: (tiles[min(tile, 8)][np.newaxis], "CYX"))
+    monkeypatch.setattr(reader, "read_tile_positions", lambda path, s: nominal + [(70, 75)])
+    lines = []
+    assert lif2ome.convert(lif, report=lines.append, verbose=True) == {"ok": 2, "there": 0, "skipped": 0, "failed": 0}
+    assert lines[0].split()[:2] == ["ok", "Scan"] and "merged 3 x 3 tiles, overlap 25% by 25%" in lines[0]
+    assert "of 20 overlaps matched" in lines[0] and "CHECK" not in lines[0]
+    assert lines[1].split()[:5] == ["ok", "Scan", "-", "tile", "10"]   ## the tile that is in no row and no column
+    merged = tifffile.imread(lif.parent / "f" / "f - Scan.ome.tif")
+    x0, y0 = min(x for x, _ in true), min(y for _, y in true)
+    assert np.array_equal(np.squeeze(merged)[true[4][1] - y0:true[4][1] - y0 + 64, true[4][0] - x0:true[4][0] - x0 + 64], tiles[4])
+    assert "merged by lif2ome" in lif2ome.read_metadata(lif.parent / "f" / "f - Scan.ome.tif")["settings"]["Tile scan"]
+
+
+def test_a_tile_scan_with_a_merged_copy_is_skipped(fake, monkeypatch):
+    lif, _ = fake
+    info = lif2ome.ImageInfo(str(lif), "CYX", (1, 64, 64), "image", ["a"], dtype="uint8", tiles=9)
+    whole = lif2ome.ImageInfo(str(lif), "CYX", (1, 8, 8), "image", ["a"], dtype="uint16")
+    monkeypatch.setattr(reader, "series_list", lambda path: ["Scan", "Scan_Merged"])
+    monkeypatch.setattr(reader, "read_info", lambda path, s, tiles=False: info if s == 0 else whole)
+    lines = []
+    assert lif2ome.convert(lif, report=lines.append) == {"ok": 1, "there": 0, "skipped": 1, "failed": 0}
+    assert lines[0].split()[0] == "skipped" and "the file has the merged series 'Scan_Merged'" in lines[0]

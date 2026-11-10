@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
-from . import reader
+from . import reader, stitch
 from .writer import write_ome
 
 
@@ -64,8 +64,19 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     """ Writes and checks one file. Returns (done, the words for the progress line, the details for --verbose).
     status gets the step in work """
     start = time.time()
-    status("reading (step 1 of 3)")
-    data, axes = reader.read_series(info, tile)
+    merged = ""
+    if isinstance(tile, dict):   ## a tile scan to merge
+        status(f"reading and merging {len(tile['tiles'])} tiles (step 1 of 3)")
+        axes = "".join(ax for ax in reader.OME_ORDER if ax in info.axes)
+        data, found = stitch.merge(tile["positions"], lambda k: reader.read_series(info, tile["tiles"][k])[0])
+        merged = (f"{found['columns']} x {found['rows']} tiles, overlap {found['overlap_x']:.0%} by {found['overlap_y']:.0%}; "
+                  f"merged by lif2ome from the stage positions, each tile moved to fit its overlaps: "
+                  f"{found['matched']} of {found['pairs']} overlaps matched, largest move {found['moved']:.0f} px")
+        if found["matched"] < found["pairs"] / 2:
+            merged += "; CHECK THE MERGE: few overlaps matched"
+    else:
+        status("reading (step 1 of 3)")
+        data, axes = reader.read_series(info, tile)
     data, axes = _ome_layout(data, axes, info.kind)
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.name + ".part")
@@ -73,6 +84,8 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     settings = reader.read_settings(info.path, info.series)
     if info.notes:
         settings["Note on the axes"] = "; ".join(info.notes)
+    if merged:
+        settings["Tile scan"] = merged
     write_ome(part, data, axes, info.channels, info.pixel_size, info.z_step, metadata, settings,
               reader.read_xml(info.path, info.series), info.pixel_size_y, info.time_step)
     ## ponytail: the check holds the series twice in memory; compare plane by plane if a series outgrows the memory
@@ -87,18 +100,27 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     details += f", z step {info.z_step:.4f} µm" if info.z_step and "Z" in axes else ""
     details += f", {info.time_step:.4g} s between frames" if info.time_step and "T" in axes else ""
     details += "".join(f", {note}" for note in info.notes) + big
-    return True, f"{_gb(data.nbytes)} -> {_gb(out.stat().st_size)}   {_took(time.time() - start)}", details
+    words = f"{_gb(data.nbytes)} -> {_gb(out.stat().st_size)}   {_took(time.time() - start)}"
+    if merged:
+        words += f"   merged {merged.split(';')[0]}" + ("; CHECK THE MERGE: few overlaps matched" if "CHECK" in merged else "")
+        details = merged.split("; ", 1)[1] + "\n" + details
+    return True, words, details
 
 
 def job_bytes(job):
     """ The size of the pixels of one job of plan(), in bytes; 0 for a series that is not converted """
-    info = job[1]
-    return int(np.prod(info.shape)) * np.dtype(info.dtype).itemsize if info is not None else 0
+    info, tile = job[1], job[2]
+    count = len(tile["tiles"]) if isinstance(tile, dict) else 1   ## a merge reads every tile of the scan
+    return int(np.prod(info.shape)) * np.dtype(info.dtype).itemsize * count if info is not None else 0
 
 
 def plan(path, only=None, tiles=False, out_dir=None):
     """ The jobs of one file, one per output file: [(label, info, tile, out, error)]. A series that is not converted
-    has an error text ("SKIPPED: ..." or "FAILED: ...") and no info """
+    has an error text ("SKIPPED: ..." or "FAILED: ...") and no info. tile is None for a plain series, the number of
+    the tile for one tile of a tile scan, and {"tiles": [...], "positions": [...]} for a tile scan to merge.
+
+    A tile scan is merged into one file, unless tiles is True (one file per tile) or the file already holds the merged
+    image: a series whose name begins with the name of the tile scan and has "merg" in it, as LAS X names it """
     path = Path(path)
     jobs, selected, used = [], [], set()
     names = reader.series_list(path)
@@ -114,15 +136,28 @@ def plan(path, only=None, tiles=False, out_dir=None):
     for s, name in enumerate(names):
         label = unique(name)
         try:
-            info = reader.read_info(path, s, tiles)
+            info = reader.read_info(path, s, True)
+            numbers, merge = (range(info.tiles) if info.tiles else [None]), None
+            if info.tiles and not tiles:
+                copy = next((n for n in names if n != name and n.startswith(name) and "merg" in n.lower()), None)
+                if copy:
+                    raise reader.Unsupported(f"tile scan with {info.tiles} tiles; the file has the merged series {copy!r}")
+                try:
+                    positions = reader.read_tile_positions(path, s)
+                except reader.Unsupported as e:
+                    raise reader.Unsupported(f"tile scan with {info.tiles} tiles, not merged: {e}; use --tiles for one "
+                                             "file per tile") from None
+                off = stitch.grid(positions, info.shape[-2:])["off_grid"]   ## a tile in no row and no column
+                keep = [k for k in range(info.tiles) if k not in off]
+                merge, numbers = {"tiles": keep, "positions": [positions[k] for k in keep]}, off
         except reader.Unsupported as e:
             series_jobs = [(label, None, None, None, f"SKIPPED: {e}")]
         except Exception as e:
             series_jobs = [(label, None, None, None, f"FAILED: {type(e).__name__}: {e}")]
         else:
             width = max(len(str(info.tiles)), 2)
-            series_jobs = []
-            for tile in range(info.tiles) if info.tiles else [None]:
+            series_jobs = [(label, info, merge, out_path(path, label, out_dir), None)] if merge else []
+            for tile in numbers:
                 full = label if tile is None else unique(f"{label} - tile {tile + 1:0{width}d}")
                 series_jobs.append((full, info, tile, out_path(path, full, out_dir), None))
         jobs.extend(series_jobs)

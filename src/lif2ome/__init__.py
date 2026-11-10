@@ -9,7 +9,8 @@
     read_xml(path, series)       the full Leica XML of one series
     read_metadata(ome_path)      your fields, the settings and the Leica XML of a file that lif2ome wrote
 
-reader.py reads, writer.py writes, converter.py does a whole file, cli.py is the lif2ome command.
+reader.py reads, writer.py writes, stitch.py merges the tiles of a tile scan, converter.py does a whole file,
+cli.py is the lif2ome command.
 """
 from .cli import main
 from .converter import convert, out_path

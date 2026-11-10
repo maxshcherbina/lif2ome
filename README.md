@@ -10,6 +10,7 @@ with the pixels that were read from the `.lif`.
 - Keeps the microscope settings: each file carries the full Leica XML of its series, plus a short summary you can read.
 - Stores your own fields in each file, such as the genotype.
 - Reads every new file back and checks that it holds the same pixels that were read from the `.lif`.
+- Merges a tile scan that LAS X left unmerged into one image.
 - Skips files that already exist, so an interrupted run picks up at the next series.
 
 The output is standard OME-TIFF, the format that Fiji, napari, QuPath and bioio read.
@@ -55,7 +56,7 @@ series that were not converted:
 [1/2] My experiment.lif   3 series, 1.52 GB
   ok        Series001   0.49 GB -> 0.14 GB   12 s, about 30 s left
   there     Series002
-  skipped   TileScan 1  tile scan with 16 tiles; convert the merged series, or use --tiles for one file per tile
+  skipped   TileScan 1  tile scan with 16 tiles; the file has the merged series 'TileScan 1_Merged'
   file done: 1 converted, 1 already there, 1 skipped in 12 s.   Total: 3 of 7 series, about 30 s left
 
 [2/2] Second experiment.lif   4 series, 1.94 GB
@@ -66,7 +67,7 @@ Done in 48 s: 5 converted, 1 already there, 1 skipped, 0 failed
 /path/to/My experiment
   now holds 2 OME-TIFF files, 0.28 GB
 Not converted:
-  My experiment.lif: TileScan 1: skipped, tile scan with 16 tiles; convert the merged series, or use --tiles for one file per tile
+  My experiment.lif: TileScan 1: skipped, tile scan with 16 tiles; the file has the merged series 'TileScan 1_Merged'
 ```
 
 Options:
@@ -74,7 +75,7 @@ Options:
 | Option | What it does |
 |---|---|
 | `--only "Series003"` | Convert only the series with this name. |
-| `--tiles` | Write one file per tile of a tile scan. |
+| `--tiles` | Write one file per tile of a tile scan, and do not merge it. |
 | `--out FOLDER` | Write the files to this folder. |
 | `--meta genotype=Ecad` | Store your own field in each new file. Repeat the option to add more. |
 | `--verbose` | Add the axes, the shape, the channels and the pixel sizes under each converted series. |
@@ -107,6 +108,37 @@ My experiment/
 
 A channel is named after its dye if the `.lif` records one. Otherwise it takes the channel colour from LAS X, such as
 `Green`. With neither, it is `Channel 1`, `Channel 2`, and so on.
+
+## Tile scans
+
+A tile scan that was merged in LAS X is one large image, and it converts like any other series.
+
+A tile scan that was left unmerged holds one image per tile. `lif2ome` merges it into one file:
+
+1. It reads the stage position of every tile from the `.lif`. The grid and the overlap follow from those positions, so
+   a scan taken with 10% overlap and one taken with 20% both work.
+2. It matches the picture in each overlap between neighbouring tiles, and moves every tile to the place that fits all
+   its overlaps best. A stage does not return to exactly the same place on each row, so the positions alone leave
+   visible steps at the seams.
+3. It places the tiles on one canvas. Where two tiles overlap, the pixels of one tile are kept as they are. No pixel
+   value is averaged or changed.
+
+The progress line and the settings summary in the file say what was done:
+
+```
+  ok        TileScan 2   3.89 GB -> 0.87 GB   2 min 03 s   merged 14 x 16 tiles, overlap 10% by 10%
+```
+
+```
+Tile scan    14 x 16 tiles, overlap 10% by 10%; merged by lif2ome from the stage positions, each tile moved to
+             fit its overlaps: 418 of 418 overlaps matched, largest move 70 px
+```
+
+- If few overlaps match, the line says `CHECK THE MERGE`. The tiles then sit where the stage put them.
+- If the file already holds the merged image, a series named after the tile scan with "merged" in its name, the
+  unmerged scan is skipped.
+- A tile that lies in no row and no column of the grid is written as a file of its own.
+- `--tiles` writes one file per tile instead.
 
 ## Metadata
 
@@ -205,8 +237,9 @@ lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one serie
 
 ## Limitations
 
-- Tile scans are skipped unless you pass `--tiles`, and `--tiles` writes the tiles separately without stitching them.
-  LAS X usually saves the merged image as another series in the same file.
+- A merged tile scan has no blend at the seams, and the tiles keep their own brightness. A tile that is brighter in
+  the middle than at its edge leaves a faint grid, as it does in a LAS X merge without smoothing.
+- A tile scan with flipped or swapped scan axes is not merged. Use `--tiles` for it.
 - A cross-section (XZ scan) is stored with its depth axis as Y, because a plane of an OME-TIFF is always Y by X.
   The Y pixel size in the file is then the depth step.
 - A whole series is held in memory, plus a second copy for the pixel check.
