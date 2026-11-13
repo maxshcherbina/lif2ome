@@ -685,14 +685,14 @@ dev = [{ name = "pytest", specifier = ">=9.2.0" }]
 
 [[package]]
 name = "liffile"
-version = "2026.11.8"
+version = "2026.11.12"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/24/0b/736cc8b78255853d978f64fdd1fdb73d3b98712dc2f42445378ac2daa5fd/liffile-2026.11.8.tar.gz", hash = "sha256:a699f04fc25000791b9298b0a92b6aae09aaf996f3b6a05d0371b1539995fd75", size = 62799, upload-time = "2026-11-08T18:25:42.816Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fa/89/08570df209ed44f20912388ab276967f61c8a546222fea762ed72dbdb49d/liffile-2026.11.12.tar.gz", hash = "sha256:a405c45a04f38150a7f3631076715943708164f1e9140ac5fb3dbb1a88363484", size = 63313, upload-time = "2026-11-13T01:20:22.11Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e7/bc/0cdf5173af941bfdf7a5d6e9303bdab1dddd8a985a501b3c6df688ba5d6c/liffile-2026.11.8-py3-none-any.whl", hash = "sha256:2de92ec0048155b40e62cde6397d1134a9d7259d58bc7eb3d1a257ca8baaedee", size = 41131, upload-time = "2026-11-08T18:25:41.823Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/0b/8a5d3393aec943666acd9678f19ef94e4db2d22646a75a71750cfc06ffb3/liffile-2026.11.12-py3-none-any.whl", hash = "sha256:c2cfbe5a5ec6d9ed708a027c9d19d49fc87cb6a6c7c2584664e2d2f045f47bca", size = 41274, upload-time = "2026-11-13T01:20:20.888Z" },
 ]
 
 [[package]]
