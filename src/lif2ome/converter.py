@@ -207,8 +207,8 @@ def plan(path, only=None, tiles=False, out_dir=None):
     the tile for one tile of a tile scan, and {"tiles": [...], "positions": [...], "left_out": n} for a tile scan to
     merge.
 
-    A tile scan is merged into one file, unless tiles is True (one file per tile) or the file already holds the merged
-    image: a series whose name begins with the name of the tile scan and has "merg" in it, as LAS X names it """
+    A tile scan is merged into one file, unless tiles is True (one file per tile) or its positions cannot be read.
+    Any LAS X merge is converted separately as a plain series under its own name. """
     path = Path(path)
     jobs, selected, used = [], [], set()
     names = reader.series_list(path)
@@ -228,9 +228,6 @@ def plan(path, only=None, tiles=False, out_dir=None):
             info = reader.read_info(path, s, True)
             numbers, merge = (range(info.tiles) if info.tiles else [None]), None
             if info.tiles and not tiles:
-                copy = next((n for n in paths if n != series_path and n.startswith(series_path) and "merg" in n.lower()), None)
-                if copy:
-                    raise reader.Unsupported(f"tile scan with {info.tiles} tiles; the file has the merged series {copy!r}")
                 try:
                     positions = reader.read_tile_positions(path, s)
                 except reader.Unsupported as e:

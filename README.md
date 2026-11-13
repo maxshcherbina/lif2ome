@@ -57,7 +57,7 @@ series that were not converted:
 [1/2] My experiment.lif   3 series, 1.52 GB
   ok        Series001   0.49 GB -> 0.14 GB   12 s, about 30 s left
   there     Series002
-  skipped   TileScan 1  tile scan with 16 tiles; the file has the merged series 'TileScan 1_Merged'
+  skipped   Series003   axes L, Y, X: only T, Z, C, Y and X are read, with planes of Y by X or Z by X
   file done: 1 converted, 1 already there, 1 skipped in 12 s.   Total: 3 of 7 series, about 30 s left
 
 [2/2] Second experiment.lif   4 series, 1.94 GB
@@ -68,7 +68,7 @@ Done in 48 s: 5 converted, 1 already there, 1 skipped, 0 failed
 /path/to/My experiment
   now holds 2 OME-TIFF files, 0.28 GB
 Not converted:
-  My experiment.lif: TileScan 1: skipped, tile scan with 16 tiles; the file has the merged series 'TileScan 1_Merged'
+  My experiment.lif: Series003: skipped, axes L, Y, X: only T, Z, C, Y and X are read, with planes of Y by X or Z by X
 ```
 
 Options:
@@ -164,8 +164,8 @@ Tile scan    14 x 16 tiles, overlap 10% by 10%; merged by lif2ome from the stage
 ```
 
 - If few overlaps match, the line says `CHECK THE MERGE`. The tiles then sit where the stage put them.
-- If the file already holds the merged image, a series named after the tile scan with "merged" in its name, the
-  unmerged scan is skipped.
+- A merge that LAS X made is converted too, as the series it is, under its own name. The two files can differ: check
+  the LAS X one if its size is far from the size of the scan.
 - A tile that lies in no row and no column of the grid is left out of the merge. The progress line and the settings
   summary say so, and `--tiles` writes it.
 - `--tiles` writes one file per tile instead.

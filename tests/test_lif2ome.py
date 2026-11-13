@@ -742,15 +742,27 @@ def test_convert_merges_a_tile_scan(fake, monkeypatch, capsys):
     assert "merged by lif2ome" in lif2ome.read_metadata(lif.parent / "f" / "f - Scan.ome.tif")["settings"]["Tile scan"]
 
 
-def test_a_tile_scan_with_a_merged_copy_is_skipped(fake, monkeypatch):
+def test_a_tile_scan_with_a_merged_copy_converts_both(fake, monkeypatch):
     lif, _ = fake
+    _, nominal, _, tiles = scene_and_tiles()
+    plain = stack((1, 8, 8))
     info = lif2ome.ImageInfo(str(lif), "CYX", (1, 64, 64), "image", ["a"], dtype="uint8", tiles=9)
     whole = lif2ome.ImageInfo(str(lif), "CYX", (1, 8, 8), "image", ["a"], dtype="uint16")
     monkeypatch.setattr(reader, "series_list", lambda path: ["Scan", "Scan_Merged"])
     monkeypatch.setattr(reader, "read_info", lambda path, s, tiles=False: info if s == 0 else whole)
+    monkeypatch.setattr(reader, "read_tile_positions", lambda path, s: nominal)
+    monkeypatch.setattr(reader, "read_series", lambda info, tile=None:
+                        (plain if tile is None else tiles[tile][np.newaxis], "CYX"))
     lines = []
-    assert lif2ome.convert(lif, report=lines.append) == {"ok": 1, "there": 0, "skipped": 1, "failed": 0}
-    assert lines[0].split()[0] == "skipped" and "the file has the merged series 'Scan_Merged'" in lines[0]
+    assert lif2ome.convert(lif, report=lines.append) == {"ok": 2, "there": 0, "skipped": 0, "failed": 0}
+    assert lines[0].split()[:2] == ["ok", "Scan"] and "merged 3 x 3 tiles" in lines[0]
+    assert lines[1].split()[:2] == ["ok", "Scan_Merged"] and "merged" not in lines[1]
+    scan = lif.parent / "f" / "f - Scan.ome.tif"
+    las_x = lif.parent / "f" / "f - Scan_Merged.ome.tif"
+    assert {f.name for f in scan.parent.iterdir()} == {scan.name, las_x.name}
+    assert "merged by lif2ome" in lif2ome.read_metadata(scan)["settings"]["Tile scan"]
+    assert "Tile scan" not in lif2ome.read_metadata(las_x)["settings"]
+    assert np.array_equal(tifffile.imread(las_x), plain.squeeze())
 
 
 @pytest.mark.parametrize("luts, expected", [
