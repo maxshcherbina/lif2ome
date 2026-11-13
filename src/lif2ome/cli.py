@@ -5,6 +5,9 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+import tifffile
+
 from . import reader
 from .converter import _gb, _projection_kinds, _time_left, _took, convert, job_bytes, plan
 from .writer import read_metadata
@@ -13,7 +16,7 @@ from .writer import read_metadata
 def _inspect(path, label):
     """ Prints the metadata of an OME-TIFF that lif2ome wrote, or the settings of each series of a .lif file """
     print(label)
-    if str(path).lower().endswith(".lif"):
+    if Path(path).suffix.lower() not in (".tif", ".tiff") and reader._is_lif(path):
         blocks = [(f"Series {name}", reader.read_settings(path, s)) for s, name in enumerate(reader.series_paths(path))]
         xml = None
     else:
@@ -24,6 +27,7 @@ def _inspect(path, label):
         for name, color in zip(meta["channels"], meta["colors"]):
             text = words.get(color, ", ".join(map(str, color))) if color is not None else ""
             print(f"    {name:<{width}}  {text}".rstrip())
+        _inspect_times(path, meta["plane_times"])
         blocks, xml = [("Your fields", meta["fields"]), ("Microscope settings", meta["settings"])], meta["leica_xml"]
     for title, pairs in blocks:
         print(f"  {title}" + ("" if pairs else ": none"))
@@ -34,8 +38,23 @@ def _inspect(path, label):
         print(f"  Leica XML: {len(xml):,} characters" if xml else "  Leica XML: none")
 
 
+def _inspect_times(path, times):
+    if not times:
+        return
+    with tifffile.TiffFile(path) as tif:
+        series = tif.series[0]
+        if "T" not in series.axes or series.shape[series.axes.index("T")] <= 1:
+            return
+        values = np.asarray(times).reshape(series.shape[:-2])
+        t = series.axes.index("T")
+        starts = np.moveaxis(values, t, 0).reshape(series.shape[t], -1).min(axis=1)
+    steps = np.diff(starts)
+    print(f"  Times: {len(starts)} time points, {max(times) - min(times):.6g} s from first to last plane, "
+          f"steps {steps.min():.6g} to {steps.max():.6g} s")
+
+
 def _expand(paths):
-    """ [(path, label)]: a file as it is, labelled with its name; a folder as every .lif file in it and in its
+    """ [(path, label)]: a file as it is, labelled with its name; a folder as every .lif and .xlef file in it and in its
     subfolders, sorted, each labelled with its path from the folder (two subfolders can hold files with one name).
     A name that starts with "." or "@" is not searched: macOS leaves ._name.lif files on network shares, and a NAS
     keeps deleted files in @Recycle """
@@ -44,10 +63,10 @@ def _expand(paths):
         if not path.is_dir():
             found.append((path, path.name))
             continue
-        lifs = sorted(f for f in path.rglob("*") if f.suffix.lower() == ".lif" and f.is_file()
+        lifs = sorted(f for f in path.rglob("*") if f.suffix.lower() in (".lif", ".xlef") and f.is_file()
                       and not any(part.startswith((".", "@")) for part in f.relative_to(path).parts))
         if not lifs:
-            print(f"{path}: no .lif files in this folder", flush=True)
+            print(f"{path}: no .lif or .xlef files in this folder", flush=True)
         found += [(f, f.relative_to(path).as_posix()) for f in lifs]
     unique = {}
     for path, label in found:
@@ -67,10 +86,11 @@ def _projections(text):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="lif2ome", description="Convert every series of Leica .lif files to "
-                                     "OME-TIFF files, in a folder named after each .lif file, beside it.")
-    parser.add_argument("files", nargs="+", type=Path, help="one or more .lif files, or folders: a folder stands for "
-                        "every .lif file in it and in its subfolders")
+    parser = argparse.ArgumentParser(prog="lif2ome", description="Convert every series of Leica files to "
+                                     "OME-TIFF files, in a folder named after each input file, beside it.")
+    parser.add_argument("files", nargs="+", type=Path, help="Leica files (.lif, .xlef, .xlcf, .xllf, .lof, .xlif), "
+                        ".czi files, or folders: a folder stands for "
+                        "every .lif and .xlef file in it and in its subfolders")
     parser.add_argument("--only", metavar="SERIES", help="convert the series with this name only")
     parser.add_argument("--tiles", action="store_true", help="write one file per tile of a tile scan; without this, an "
                         "unmerged tile scan is merged into one file")
@@ -80,10 +100,11 @@ def main(argv=None):
     parser.add_argument("--meta", metavar="KEY=VALUE", action="append", default=[],
                         help="a field of your own that each new file gets, for example --meta genotype=Ecad; "
                         "give it more than one time for more fields")
+    parser.add_argument("--low-memory", action="store_true", help="always stream series writing and checking")
     parser.add_argument("--verbose", action="store_true", help="add the axes, the shape, the channels and the pixel "
                         "sizes to the line of each converted series")
     parser.add_argument("--inspect", action="store_true", help="convert nothing: print the metadata of .ome.tif files "
-                        "that lif2ome wrote, or the microscope settings of each series of .lif files")
+                        "that lif2ome wrote, or the microscope settings of each series of Leica files")
     args = parser.parse_args(argv)
     if any("=" not in pair for pair in args.meta):
         parser.error("--meta needs KEY=VALUE, for example --meta genotype=Ecad")
@@ -151,7 +172,7 @@ def main(argv=None):
             counts = {"failed": 1}
         else:
             counts = convert(path, args.only, args.tiles, out, report, status, fields, args.verbose, jobs,
-                             result=result, projections=args.projections)
+                             result=result, projections=args.projections, low_memory=args.low_memory)
         for key, n in counts.items():
             total[key] = total.get(key, 0) + n
         bytes_left, bytes_done, series_done = bytes_left - mine, bytes_done + converted_bytes, series_done + len(jobs)

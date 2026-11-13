@@ -1,5 +1,6 @@
 """No test needs a microscope file: convert() runs on a made-up file through a patched reader.
 A real file: LIF2OME_TEST_LIF=/path/to/file.lif uv run pytest"""
+from contextlib import contextmanager
 import os
 import tracemalloc
 from pathlib import Path
@@ -181,6 +182,11 @@ def fake(monkeypatch, tmp_path):
                                                             for n in reader.series_list(path)])
     monkeypatch.setattr(reader, "read_info", read_info)
     monkeypatch.setattr(reader, "read_series", read_series)
+    @contextmanager
+    def mapped(info, tile=None):
+        yield reader.read_series(info, tile)
+    monkeypatch.setattr(reader, "mapped_series", mapped)
+    monkeypatch.setattr(reader, "read_plane_times", lambda info, tile=None: None)
     def no_positions(path, s):
         raise reader.Unsupported("the file gives no stage position for each tile")
 
@@ -348,7 +354,7 @@ def test_file_without_metadata(tmp_path):
     lif2ome.write_ome(f, stack(), "CZYX")
     assert lif2ome.read_metadata(f) == {"fields": {}, "settings": {}, "leica_xml": "",
                                       "channels": ["", ""], "colors": [None, None],
-                                      "pixel_size": 0.0, "pixel_size_y": 0.0, "z_step": 0.0, "time_step": 0.0}
+                                      "pixel_size": 0.0, "pixel_size_y": 0.0, "z_step": 0.0, "time_step": 0.0, "plane_times": []}
 
 
 def test_meta_option(fake, capsys):
@@ -403,7 +409,7 @@ def test_empty_folder_is_not_a_failure(tmp_path, capsys):
     (tmp_path / "quiet" / "@Recycle").mkdir(parents=True)
     (tmp_path / "quiet" / "@Recycle" / "old.lif").touch()
     assert lif2ome.main([str(tmp_path / "quiet")]) == 0
-    assert "no .lif files in this folder" in capsys.readouterr().out
+    assert "no .lif or .xlef files in this folder" in capsys.readouterr().out
 
 
 def test_verbose_adds_the_details(fake):
@@ -535,7 +541,7 @@ def lif_images(monkeypatch):
         data = stack(shape)
         im = SimpleNamespace(name=path.rsplit('/', 1)[-1], path=path, dims=tuple(dims), shape=shape, dtype=data.dtype,
                              coords=coords or {}, xml_element=ElementTree.fromstring(xml),
-                             timestamps=None, asarray=lambda: data)
+                             timestamps=None, memory_block=SimpleNamespace(offset=1), asarray=lambda **kwargs: data)
         images.append(im)
         return im, len(images) - 1
     return add
@@ -1007,3 +1013,289 @@ def test_projection_uses_saved_axes_and_signed_values(fake, axes, shape):
         actual = tifffile.imread(path)
         assert actual.dtype == (np.int16 if kind == 'max' else np.float32)
         np.testing.assert_array_equal(actual, reduce(data, axis=axes.index('Z')))
+
+
+@pytest.mark.parametrize('fallback', [False, True])
+@pytest.mark.parametrize('fail', [False, True])
+def test_mapped_conversion_memory_and_cleanup(lif_images, tmp_path, monkeypatch, fallback, fail):
+    shape = (8, 4, 1024, 1024)
+    im, _ = lif_images('ZCYX', (1, 1, 2, 2))
+    im.shape, im.dtype = shape, np.dtype('uint16')
+    im.coords = {'C': ['a', 'b', 'c', 'd']}
+    im.memory_block.offset = -1 if fallback else 1
+    raw = tmp_path / 'pixels.raw'
+    with raw.open('wb') as fh:
+        fh.truncate(int(np.prod(shape)) * 2)
+    maps, handles = [], []
+    def asarray(*, out):
+        if isinstance(out, str):
+            data = np.memmap(raw, mode='r', shape=shape, dtype=im.dtype)
+            maps.append(data._mmap)
+            return data
+        maps.append(out._mmap)
+        for index in np.ndindex(shape[:-2]):
+            out[index] = 0
+        return out
+    im.asarray = asarray
+    original = reader.liffile.LifFile
+    class File(original):
+        def __init__(self, path):
+            super().__init__(path)
+            self.handle = raw.open('rb')
+            handles.append(self.handle)
+        def close(self):
+            self.handle.close()
+    monkeypatch.setattr(reader.liffile, 'LifFile', File)
+    from lif2ome import writer
+    planes = writer.iter_planes
+    def broken(data):
+        for k, plane in enumerate(planes(data)):
+            if k == 3:
+                raise OSError('write stopped')
+            yield plane
+    if fail:
+        monkeypatch.setattr(writer, 'iter_planes', broken)
+    tracemalloc.start()
+    try:
+        counts = lif2ome.convert(tmp_path / 'f.lif', report=lambda text: None, low_memory=True)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert counts['failed' if fail else 'ok'] == 1
+    assert peak < 24 * 1024**2, f'conversion allocated {peak / 1024**2:.1f} MiB'
+    assert maps and all(m.closed for m in maps)
+    assert handles and all(h.closed for h in handles)
+    assert not list(tmp_path.rglob('*.part'))
+
+
+def test_streamed_header_matches_array(tmp_path):
+    import re
+    data = stack((3, 2, 4, 5)).transpose(1, 0, 2, 3)
+    old, new = tmp_path / 'old.tif', tmp_path / 'new.tif'
+    tifffile.imwrite(old, data, ome=True, compression='zlib', photometric='minisblack', metadata={'axes': 'CZYX'})
+    lif2ome.write_ome(new, data, 'CZYX', streaming=True)
+    with tifffile.TiffFile(old) as a, tifffile.TiffFile(new) as b:
+        clean = lambda xml: re.sub(r'urn:uuid:[^" ]+', 'UUID', xml)
+        assert clean(a.ome_metadata) == clean(b.ome_metadata)
+        for first, second in zip(a.pages, b.pages):
+            np.testing.assert_array_equal(first.asarray(), second.asarray())
+
+
+def test_plane_times_movie(lif_images, tmp_path, capsys):
+    im, _ = lif_images('TZCYX', (3, 2, 2, 4, 5), {'C': ['a', 'b'], 'T': [0, 3, 8]})
+    seconds = np.array([0, .1, .2, .3, 3, 3.1, 3.2, 3.3, 8, 8.1, 8.2, 8.3])
+    im.timestamps = np.datetime64('2026-01-01') + (seconds * 1000).astype('timedelta64[ms]')
+    path = tmp_path / 'movie.lif'
+    info = reader.read_info(path)
+    expected = seconds.reshape(3, 2, 2).transpose(0, 2, 1)
+    np.testing.assert_allclose(reader.read_plane_times(info), expected)
+    assert lif2ome.convert(path, projections=('max',), report=lambda text: None)['ok'] == 1
+    out = lif2ome.out_path(path, 'Test')
+    with tifffile.TiffFile(out) as tif:
+        planes = ElementTree.fromstring(tif.ome_metadata).findall('.//{*}Plane')
+        assert tif.series[0].axes == 'TCZYX'
+        for k in (1, 5, 9, 11):
+            assert float(planes[k].get('DeltaT')) == pytest.approx(expected.ravel()[k])
+            assert planes[k].get('DeltaTUnit') == 's'
+    assert lif2ome.read_metadata(out)['plane_times'] == pytest.approx(expected.ravel())
+    assert lif2ome.read_metadata(out)['time_step'] == 4
+    assert lif2ome.read_metadata(out.parent / 'projections' / f'MAX_{out.name}')['plane_times'] == []
+    lif2ome.main(['--inspect', str(out)])
+    assert 'Times: 3 time points, 8.3 s from first to last plane, steps 3 to 5 s' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('count', [None, 0, 2, 5])
+def test_plane_times_missing(lif_images, count):
+    im, _ = lif_images('TCYX', (3, 2, 4, 5))
+    if count is not None:
+        im.timestamps = np.arange(count).astype('datetime64[s]')
+    assert reader.read_plane_times(reader.read_info('f.lif')) is None
+
+
+def test_plane_times_tiles_and_cross_section(lif_images):
+    im, _ = lif_images('TM CYZX'.replace(' ', ''), (3, 2, 2, 4, 5, 6))
+    im.timestamps = np.arange(48).astype('datetime64[s]')
+    info = reader.read_info('f.lif', tiles=True)
+    expected = np.arange(48).reshape(3, 2, 2, 4)[:, 1]
+    np.testing.assert_array_equal(reader.read_plane_times(info, tile=1), expected)
+    assert expected[0, 0, 0] == 8
+
+
+@pytest.mark.parametrize('suffix', ['.lif', '.xlef', '.xlcf', '.xllf', '.lof', '.xlif'])
+@pytest.mark.parametrize('upper', [False, True])
+def test_leica_endings(lif_images, tmp_path, capsys, suffix, upper):
+    suffix = suffix.upper() if upper else suffix
+    im, _ = lif_images('YX', (4, 5), path='Folder/Image')
+    path = tmp_path / ('source' + suffix)
+    assert reader.series_list(path) == ['Image']
+    assert reader.series_paths(path) == ['Folder/Image']
+    info = reader.read_info(path)
+    assert info.name == 'source - Image'
+    np.testing.assert_array_equal(reader.read_series(info)[0], im.asarray())
+    assert reader.read_settings(path)['Series'] == 'Folder/Image'
+    assert reader.read_xml(path) == '<Element />'
+    with pytest.raises(reader.Unsupported, match='no stage position'):
+        reader.read_tile_positions(path)
+    assert lif2ome.convert(path, report=lambda text: None)['ok'] == 1
+    assert (tmp_path / 'source' / 'source - Folder_Image.ome.tif').exists()
+    assert lif2ome.main(['--inspect', str(path)]) == 0
+    assert 'Series Folder/Image' in capsys.readouterr().out
+
+
+def test_folder_search_only_lif_and_xlef(tmp_path):
+    from lif2ome.cli import _expand
+    names = ['a.lif', 'sub/b.XLEF', 'sub/c.lof', 'd.xlif', 'e.xlcf', 'f.xllf',
+             '.hidden/g.xlef', '@Recycle/h.lif']
+    for name in names:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    assert [label for _, label in _expand([tmp_path])] == ['a.lif', 'sub/b.XLEF']
+    assert [label for _, label in _expand([tmp_path / 'sub/c.lof'])] == ['c.lof']
+
+
+@pytest.mark.parametrize('call', [reader.series_list, reader.series_paths, reader.read_info,
+                                  reader.read_settings, reader.read_xml, reader.read_tile_positions, lif2ome.convert])
+def test_unknown_ending(call):
+    with pytest.raises(ValueError, match=r'accepted endings are .lif, .xlef, .xlcf, .xllf, .lof, .xlif, .czi'):
+        call('unknown.dat')
+
+
+def test_plane_times_channel_first_movie(lif_images, tmp_path, capsys):
+    im, _ = lif_images('TCYX', (3, 2, 4, 5), {'C': ['a', 'b']})
+    im.timestamps = np.array([0, 1, 3, 4, 8, 9]).astype('datetime64[s]')
+    path = tmp_path / 'movie.lif'
+    assert lif2ome.convert(path, report=lambda text: None)['ok'] == 1
+    out = lif2ome.out_path(path, 'Test')
+    assert lif2ome.read_metadata(out)['plane_times'] == [0, 3, 8, 1, 4, 9]
+    lif2ome.main(['--inspect', str(out)])
+    assert '3 time points, 9 s from first to last plane, steps 3 to 5 s' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_mapped_tile_cleanup(lif_images, monkeypatch, fail):
+    im, _ = lif_images('MZCYX', (2, 3, 2, 4, 5))
+    info = reader.read_info('f.lif', tiles=True)
+    maps = []
+    class Frames:
+        def __init__(self, image, *, M):
+            assert image is im and M == 1
+            self.shape, self.dtype = info.shape, im.dtype
+        def asarray(self, *, out):
+            maps.append(out._mmap)
+            out[:] = im.asarray()[1]
+            if fail:
+                raise OSError('tile read stopped')
+            return out
+    monkeypatch.setattr(reader.liffile, 'LifImageFrames', Frames)
+    def read():
+        with reader.mapped_series(info, tile=1) as (data, axes):
+            assert axes == 'CZYX'
+            np.testing.assert_array_equal(data, im.asarray()[1].transpose(1, 0, 2, 3))
+    if fail:
+        with pytest.raises(OSError, match='tile read stopped'):
+            read()
+    else:
+        read()
+    assert maps and all(m.closed for m in maps)
+
+
+@pytest.mark.parametrize('size, expected', [(1024, False), (2**32, True)])
+def test_streamed_bigtiff_selection(tmp_path, monkeypatch, size, expected):
+    from lif2ome import writer
+    data = np.broadcast_to(np.zeros((), dtype=np.uint8), (size // 1024, 32, 32))
+    def write(path, planes, **kwargs):
+        assert kwargs['bigtiff'] is expected
+        assert kwargs['shape'] == data.shape and kwargs['dtype'] == data.dtype
+        assert kwargs['buffersize'] == 8 * 1024**2
+        assert next(planes).shape == (32, 32)
+        Path(path).touch()
+    monkeypatch.setattr(writer.tifffile, 'imwrite', write)
+    writer.write_ome(tmp_path / 'large.tif', data, 'ZYX', streaming=True)
+
+
+@pytest.mark.parametrize('axes, shape, budget, expected', [
+    ('CZYX', (2, 3, 8, 8), 768, False),
+    ('CZYX', (2, 3, 8, 8), 767, True),
+    ('TCZYX', (340, 2, 15, 1024, 1024), 2 * 1024**3, True),
+    ('ZCYX', (3, 2, 8, 8), 768, True),
+    ('ZCYX', (3, 2, 8, 8), 1536, False),
+    ('ZCYX', (3, 1, 8, 8), 384, False),
+    ('TCYX', (3, 2, 8, 8), 768, True),
+])
+def test_memory_choice(axes, shape, budget, expected):
+    info = reader.ImageInfo('f.lif', axes, shape, reader.guess_kind(axes, shape), [], dtype='uint16')
+    assert converter._use_streaming(info, budget=budget) is expected
+    assert converter._use_streaming(info, budget=10**12, low_memory=True)
+
+
+@pytest.mark.parametrize('v2, v1, expected', [
+    (None, None, 4000), ('max', None, 4000), ('2000', None, 800),
+    ('2000', '1000', 400),
+    (None, '3000', 1200), ('max', str(2**63 - 4096), 4000),
+    ('broken', '0', 4000), ('20000', None, 4000),
+])
+def test_container_memory_budget(monkeypatch, v2, v1, expected):
+    monkeypatch.setattr(converter.os, 'sysconf', lambda key: 100 if key == 'SC_PHYS_PAGES' else 100)
+    values = {'/sys/fs/cgroup/memory.max': v2,
+              '/sys/fs/cgroup/memory/memory.limit_in_bytes': v1}
+    def read(path):
+        value = values[str(path)]
+        if value is None:
+            raise FileNotFoundError(path)
+        return value
+    monkeypatch.setattr(Path, 'read_text', read)
+    assert converter._memory_budget() == expected
+
+
+@pytest.mark.parametrize('axes, shape', [('TZCYX', (3, 4, 2, 8, 9)), ('TCYX', (3, 2, 8, 9))])
+def test_conversion_paths_equal(lif_images, tmp_path, monkeypatch, axes, shape):
+    import re
+    im, _ = lif_images(axes, shape, {'C': ['a', 'b']})
+    im.timestamps = np.arange(np.prod(shape[:-2])).astype('datetime64[s]')
+    path = tmp_path / 'f.lif'
+    original = reader.mapped_series
+    modes = []
+    @contextmanager
+    def mapped(*args):
+        modes.append('streaming')
+        with original(*args) as pixels:
+            yield pixels
+    monkeypatch.setattr(reader, 'mapped_series', mapped)
+    for name, budget in [('fast', 10**9), ('stream', 0)]:
+        monkeypatch.setattr(converter, '_memory_budget', lambda: budget)
+        assert lif2ome.convert(path, out_dir=tmp_path / name, report=lambda _: None)['ok'] == 1
+    assert modes == ['streaming']
+    with tifffile.TiffFile(lif2ome.out_path(path, 'Test', tmp_path / 'fast')) as a, \
+         tifffile.TiffFile(lif2ome.out_path(path, 'Test', tmp_path / 'stream')) as b:
+        clean = lambda xml: re.sub(r'urn:uuid:[^" ]+', 'UUID', xml)
+        assert clean(a.ome_metadata) == clean(b.ome_metadata)
+        assert len(a.pages) == len(b.pages)
+        for first, second in zip(a.pages, b.pages):
+            assert first.asarray().tobytes() == second.asarray().tobytes()
+
+
+def test_low_memory_cli(lif_images, tmp_path, monkeypatch, capsys):
+    lif_images('YX', (8, 9))
+    monkeypatch.setattr(converter, '_memory_budget', lambda: 10**12)
+    monkeypatch.setattr(reader, 'read_series', lambda *args: pytest.fail('fast path selected'))
+    assert lif2ome.main([str(tmp_path / 'f.lif'), '--low-memory', '--verbose']) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert any('streamed, low memory' in line for line in lines)
+    assert all('streamed' not in line for line in lines if line.strip().startswith('ok '))
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_writer_preserves_parallel_compression(tmp_path, monkeypatch, streaming):
+    from lif2ome import writer
+    data = stack()
+    def write(path, pixels, **kwargs):
+        assert kwargs.get('maxworkers') is None
+        if streaming:
+            assert not isinstance(pixels, np.ndarray)
+            np.testing.assert_array_equal(next(pixels), data[0, 0])
+        else:
+            assert pixels is data
+        Path(path).touch()
+    monkeypatch.setattr(writer.tifffile, 'imwrite', write)
+    writer.write_ome(tmp_path / 'f.tif', data, 'CZYX', streaming=streaming)

@@ -4,8 +4,10 @@ The reader uses liffile. bioio-lif gives the colour names as channel names, keep
 top to bottom) and gives a cross-section (XZ scan) the axes of a stack. A .czi file is read through bioio when bioio and
 bioio-czi are installed; that path has no test with a real file.
 """
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from tempfile import TemporaryFile
 from xml.etree import ElementTree
 
 import liffile
@@ -13,6 +15,7 @@ import numpy as np
 
 KINDS = {"stack": "3D stack", "movie": "2D movie", "image": "2D image"}
 OME_ORDER = "TCZYX"
+LEICA_SUFFIXES = (".lif", ".xlef", ".xlcf", ".xllf", ".lof", ".xlif")
 COLORS = {"red": (255, 0, 0), "green": (0, 255, 0), "blue": (0, 0, 255),
           "gray": (255, 255, 255), "cyan": (0, 255, 255), "magenta": (255, 0, 255), "yellow": (255, 255, 0)}
 
@@ -51,8 +54,10 @@ class ImageInfo:
     @property
     def name(self):
         stem = Path(self.path).name
-        for suffix in (".ome.tif", ".ome.tiff", ".tif", ".tiff", ".lif", ".czi"):
-            stem = stem.removesuffix(suffix)
+        for suffix in (".ome.tif", ".ome.tiff", ".tif", ".tiff", *LEICA_SUFFIXES, ".czi"):
+            if stem.lower().endswith(suffix):
+                stem = stem[:-len(suffix)]
+                break
         return f"{stem} - {self.series_name}" if self.series_name else stem
 
     def describe(self):
@@ -73,7 +78,10 @@ def guess_kind(axes, shape):
 
 
 def _is_lif(path):
-    return str(path).lower().endswith(".lif")
+    suffix = Path(path).suffix.lower()
+    if suffix not in (*LEICA_SUFFIXES, ".czi"):
+        raise ValueError(f"{Path(path).name}: accepted endings are {', '.join((*LEICA_SUFFIXES, '.czi'))}")
+    return suffix in LEICA_SUFFIXES
 
 
 def series_list(path):
@@ -166,6 +174,55 @@ def read_series(info, tile=None):
             data = im.asarray()
     axes = "".join(ax for ax in OME_ORDER if ax in info.axes)
     return np.ascontiguousarray(np.transpose(data, [info.axes.index(ax) for ax in axes])), axes
+
+
+@contextmanager
+def mapped_series(info, tile=None):
+    """ Keep the source and its map open through writing and checking. """
+    if not _is_lif(info.path):
+        yield read_series(info, tile)
+        return
+    with _lif_image(info.path, info.series) as im:
+        with TemporaryFile() as temporary:
+            data = None
+            try:
+                if not info.tiles and im.memory_block.offset > 0:
+                    data = im.asarray(out="memmap")
+                else:
+                    frames = liffile.LifImageFrames(im, M=int(tile)) if info.tiles else im
+                    data = np.memmap(temporary, mode="w+", shape=frames.shape, dtype=frames.dtype)
+                    frames.asarray(out=data)
+                if data.shape != info.shape:
+                    raise ValueError(f"series has the shape {data.shape}, not {info.shape}")
+                axes = "".join(ax for ax in OME_ORDER if ax in info.axes)
+                yield np.transpose(data, [info.axes.index(ax) for ax in axes]), axes
+            finally:
+                ## A cropped view can have the map several bases below it.
+                base = data
+                while base is not None:
+                    if isinstance(base, np.memmap):
+                        base._mmap.close()
+                        break
+                    base = getattr(base, "base", None)
+
+
+def read_plane_times(info, tile=None):
+    """ Seconds from the first series stamp, in read_series leading-axis order. """
+    if not _is_lif(info.path):
+        return None
+    with _lif_image(info.path, info.series) as im:
+        stamps = im.timestamps
+        shape = tuple(im.shape[:-2])
+        if stamps is None or len(stamps) != int(np.prod(shape)) or not len(stamps):
+            return None
+        times = np.asarray((stamps - stamps[0]) / np.timedelta64(1, "s"), dtype=float).reshape(shape)
+        axes, _ = cross_section_axes("".join(im.dims))
+        axes = axes[:-2]
+        if info.tiles:
+            times = np.take(times, int(tile), axis=axes.index("M"))
+            axes = axes.replace("M", "")
+        want = "".join(ax for ax in OME_ORDER if ax in axes)
+        return np.transpose(times, [axes.index(ax) for ax in want])
 
 
 def to_cnyx(data, axes):
@@ -299,10 +356,11 @@ class _lif_image:
         self.path, self.series = path, series
 
     def __enter__(self):
+        _is_lif(self.path)
         self.lif = liffile.LifFile(self.path)
         try:
             return self.lif.images[self.series]
-        except Exception:   ## a wrong series: __exit__ does not run, so close here
+        except BaseException:   ## a wrong series: __exit__ does not run, so close here
             self.lif.close()
             raise
 
@@ -353,7 +411,7 @@ def _bioio_image(path):
     try:
         from bioio import BioImage
     except ImportError:
-        raise ValueError(f"{Path(path).name}: lif2ome reads .lif files. For a .czi file, install the extra: "
+        raise ValueError(f"{Path(path).name}: For a .czi file, install the extra: "
                          "uv pip install 'lif2ome[czi]'") from None
     return BioImage(path)
 

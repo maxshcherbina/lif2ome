@@ -6,7 +6,9 @@ with the pixels that were read from the `.lif`.
 ## Features
 
 - Writes one OME-TIFF per series, with every channel. Compression is zlib, so no pixel value changes.
-- Stores the pixel size, the Z step, the time between frames, and the name and colour of each channel in each file.
+- Stores the pixel size, the Z step, the time between frames, the time of every plane, and the name and colour of
+  each channel in each file.
+- Converts a series that is larger than the memory of the machine.
 - Keeps the microscope settings: each file carries the full Leica XML of its series, plus a short summary you can read.
 - Stores your own fields in each file, such as the genotype.
 - Reads every new file back and checks that it holds the same pixels that were read from the `.lif`.
@@ -36,7 +38,7 @@ uv add git+https://github.com/maxshcherbina/lif2ome
 lif2ome "/path/to/My experiment.lif"
 ```
 
-You can pass several files, or a folder. A folder stands for every `.lif` in it and in its subfolders; names that
+You can pass several files, or a folder. A folder stands for every `.lif` and `.xlef` in it and in its subfolders; names that
 start with `.` or `@` are left out. An empty folder is not an error.
 
 ```bash
@@ -80,6 +82,7 @@ Options:
 | `--out FOLDER` | Write the files to this folder. |
 | `--meta genotype=Ecad` | Store your own field in each new file. Repeat the option to add more. |
 | `--projections max,sum,avg` | Also write Z projections of each stack. Any mix of the three. |
+| `--low-memory` | Convert every series through a memory map, a few planes at a time. |
 | `--verbose` | Add the axes, the shape, the channels and the pixel sizes under each converted series. |
 | `--inspect` | Convert nothing. Print the metadata of `.ome.tif` files, or the settings of each series in a `.lif`. |
 
@@ -115,6 +118,14 @@ A channel is named after its dye if the `.lif` records one. Otherwise it takes t
 
 The colour that a channel has in LAS X (red, green, blue, gray, cyan, magenta or yellow) is stored with it, so a viewer
 that reads OME channel colours shows the image as LAS X did.
+
+## Other Leica file types
+
+Besides `.lif`, `lif2ome` accepts the other files that LAS X writes: `.xlef` projects, and `.lof`, `.xlif`, `.xlcf`
+and `.xllf` files. Support for these is experimental.
+
+A folder search takes `.lif` and `.xlef` files. The single-image files of a project (`.lof`, `.xlif`) are converted
+through their `.xlef`; give one by name to convert it alone.
 
 ## Projections
 
@@ -208,6 +219,13 @@ My experiment - Series001.ome.tif
   Leica XML: 33,214 characters
 ```
 
+A movie also carries the time of every plane, in seconds from the first one. `--inspect` sums it up, so uneven
+timing shows:
+
+```
+  Times: 340 time points, 5425.87 s from first to last plane, steps 15.928 to 16.008 s
+```
+
 `lif2ome --inspect "My experiment.lif"` prints the same summary for every series in a `.lif`, without converting anything.
 
 - The summary covers the settings people usually ask about. For anything else, read the Leica XML.
@@ -244,8 +262,8 @@ container run --rm -m 8g -v "/path/to/folder":/data lif2ome "My experiment.lif"
 ```
 
 - `container` gives a container 1 GB of memory by default, so `-m 8g` is required.
-- Conversion needs about 2.5 times the size of the largest series in memory. A 4.5 GB series peaked at 11 GB; use
-  `-m 16g` for files like that.
+- A series is read into memory when it fits in 40% of the memory of the container, and converted through a memory
+  map of the file when it does not. So a large series converts in a small container, only more slowly.
 - A container that runs out of memory stops without an error message. Run it again with more memory. Finished files
   are kept.
 - Add `-t` after `run` to see the status line. Without it, output appears only when a series finishes.
@@ -275,7 +293,7 @@ lif2ome.read_xml("file.lif", 0)                # the full Leica XML of one serie
 - A tile scan with flipped or swapped scan axes is not merged. Use `--tiles` for it.
 - A cross-section (XZ scan) is stored with its depth axis as Y, because a plane of an OME-TIFF is always Y by X.
   The Y pixel size in the file is then the depth step.
-- A whole series is held in memory, plus a second copy for the pixel check.
+- A merged tile scan is built in memory, so the machine needs about the size of the merged image.
 - `.czi` support is experimental. It needs the `lif2ome[czi]` extra, which uses bioio.
 
 ## Development

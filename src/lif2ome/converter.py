@@ -1,4 +1,6 @@
 """Convert every series of a file. Each new file is read back and compared with the pixels that were read."""
+from contextlib import nullcontext
+import os
 import re
 import time
 from pathlib import Path
@@ -7,7 +9,7 @@ import numpy as np
 import tifffile
 
 from . import reader, stitch
-from .writer import read_metadata, write_ome
+from .writer import iter_planes, read_metadata, write_ome
 
 
 def _projection_kinds(words):
@@ -97,18 +99,18 @@ def _ome_layout(data, axes, kind):
         data, axes = np.squeeze(data, axis=axes.index(ax)), axes.replace(ax, "")
     for ax in [a for a in want if a not in axes]:
         data, axes = data[np.newaxis], ax + axes
-    return np.ascontiguousarray(np.transpose(data, [axes.index(ax) for ax in want])), want
+    return np.transpose(data, [axes.index(ax) for ax in want]), want
 
 
 def _same_pixels(path, data, axes):
     """ Compare every pixel using one decoded YX plane at a time.
 
-    write_ome writes minisblack pages in C order from contiguous data ending in YX.
+    write_ome writes minisblack pages in C order from views ending in YX.
     Singleton axes dropped from tifffile's series axes do not affect this order.
     """
-    planes = data.reshape(-1, *data.shape[-2:])
+    planes = iter_planes(data)
     with tifffile.TiffFile(path) as tif:
-        if len(tif.pages) != len(planes):
+        if len(tif.pages) != int(np.prod(data.shape[:-2])):
             return False
         for page, plane in zip(tif.pages, planes):
             if page.dtype != data.dtype or page.shape != plane.shape:
@@ -141,7 +143,58 @@ def _took(seconds):
     return f"{minutes} min {s:02d} s" if minutes else f"{s} s"
 
 
-def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
+def _memory_budget():
+    """40% of the smaller of physical RAM and any finite cgroup v1/v2 limit."""
+    try:
+        physical = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError, AttributeError):
+        return 0   ## unknown capacity: choose streaming conservatively
+    limits = [max(0, physical)]
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            limit = int(Path(path).read_text().strip())
+        except (OSError, ValueError):   ## includes cgroup v2's "max"
+            continue
+        if 0 < limit < 2**60:   ## v1 often uses a near-int64-max sentinel
+            limits.append(limit)
+    return min(limits) * 2 // 5
+
+
+def _use_streaming(info, low_memory=False, *, budget=None):
+    """Stream when forced or series bytes exceed 40% of min(physical RAM,
+    finite container limit). Count twice the bytes if read_series' OME reorder
+    or the final TIFF layout needs a contiguous copy; singleton moves are views.
+    budget overrides the byte budget for tests. tifffile copies non-contiguous
+    array input, so a non-contiguous transpose cannot be written as-is here.
+    """
+    if low_memory:
+        return True
+    size = dict(zip(info.axes, info.shape))
+    source = "".join(ax for ax in info.axes if size[ax] > 1)
+    read = "".join(ax for ax in reader.OME_ORDER if ax in source)
+    want = "TCZYX" if size.get("T", 1) > 1 and size.get("Z", 1) > 1 else (
+        "CTYX" if info.kind == "movie" else "CZYX")
+    written = "".join(ax for ax in want if ax in source)
+    need = int(np.prod(info.shape)) * np.dtype(info.dtype).itemsize
+    need *= 2 if source != read or read != written else 1
+    return need > (_memory_budget() if budget is None else budget)
+
+
+def _convert_one(info, tile, out, status=lambda text: None, metadata=None, low_memory=False):
+    if not isinstance(tile, dict):
+        status("reading (step 1 of 3)")
+    streaming = _use_streaming(info, low_memory)
+    part = out.with_name(out.name + ".part")
+    try:
+        source = (nullcontext(None) if isinstance(tile, dict) else
+                  reader.mapped_series(info, tile) if streaming else nullcontext(reader.read_series(info, tile)))
+        with source as pixels:
+            return _convert_open(info, tile, out, status, metadata, pixels, streaming)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def _convert_open(info, tile, out, status, metadata, pixels, streaming):
     """ Writes and checks one file. Returns (done, the words for the progress line, the details for --verbose).
     status gets the step in work """
     start = time.time()
@@ -158,8 +211,11 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
         if found["matched"] < found["pairs"] / 2:
             merged += "; CHECK THE MERGE: few overlaps matched"
     else:
-        status("reading (step 1 of 3)")
-        data, axes = reader.read_series(info, tile)
+        data, axes = pixels
+    times = None if isinstance(tile, dict) else reader.read_plane_times(info, tile)
+    if times is not None:
+        times, _ = _ome_layout(times[..., np.newaxis, np.newaxis], axes, info.kind)
+        times = times[..., 0, 0]
     data, axes = _ome_layout(data, axes, info.kind)
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.name + ".part")
@@ -170,7 +226,8 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     if merged:
         settings["Tile scan"] = merged
     write_ome(part, data, axes, info.channels, info.pixel_size, info.z_step, metadata, settings,
-              reader.read_xml(info.path, info.series), info.pixel_size_y, info.time_step, channel_colors=info.colors)
+              reader.read_xml(info.path, info.series), info.pixel_size_y, info.time_step, channel_colors=info.colors,
+              plane_times=times, streaming=streaming)
     ## ponytail: read every pixel back one YX plane at a time, without a second full-series array
     status("checking the pixels (step 3 of 3)")
     if not _same_pixels(part, data, axes):
@@ -182,6 +239,8 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     details = f"{axes} {data.shape} {data.dtype}, channels {info.channels}, {info.pixel_size:.4f} µm/px"
     details += f", z step {info.z_step:.4f} µm" if info.z_step and "Z" in axes else ""
     details += f", {info.time_step:.4g} s between frames" if info.time_step and "T" in axes else ""
+    if streaming:
+        details += ", streamed, low memory"
     details += "".join(f", {note}" for note in info.notes) + big
     words = f"{_gb(data.nbytes)} -> {_gb(out.stat().st_size)}   {_took(time.time() - start)}"
     if merged:
@@ -256,7 +315,7 @@ def plan(path, only=None, tiles=False, out_dir=None):
 
 
 def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lambda text: None, metadata=None,
-            verbose=False, jobs=None, result=None, *, projections=()):
+            verbose=False, jobs=None, result=None, *, projections=(), low_memory=False):
     """ Every series of a file as an OME-TIFF (only: that series name only). Each file is read back and compared with
     the pixels that were read from the source. A file that exists is left alone, so a stopped run goes on from the next series. Returns the
     counts {"ok", "there", "skipped", "failed"}.
@@ -268,6 +327,7 @@ def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lam
     also gets the microscope settings and the full Leica XML of its series; writer.read_metadata gives all three back.
     jobs: the result of plan() for this file, when the caller has it already.
     result: an optional callback receiving (word, label, reason) for each finished series or projection.
+    low_memory: always stream writing and checking; Leica series are memory-mapped.
     projections: Z projections to write from each output file: max, sum, avg (or mean). """
     projections = _projection_kinds(projections)
     jobs = plan(path, only, tiles, out_dir) if jobs is None else jobs
@@ -286,7 +346,7 @@ def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lam
         else:
             try:
                 ok, rest, details = _convert_one(info, tile, out, lambda step: status(
-                    line("working", label, f"{_gb(job_bytes(job))}, {step}")), metadata)
+                    line("working", label, f"{_gb(job_bytes(job))}, {step}")), metadata, low_memory)
             except Exception as e:   ## one bad series does not stop the others
                 ok, rest, details = False, f"{type(e).__name__}: {e}", ""
             key, word = ("ok", "ok") if ok else ("failed", "FAILED")
