@@ -7,7 +7,82 @@ import numpy as np
 import tifffile
 
 from . import reader, stitch
-from .writer import write_ome
+from .writer import read_metadata, write_ome
+
+
+def _projection_kinds(words):
+    kinds = tuple(dict.fromkeys("avg" if word == "mean" else word for word in words))
+    if any(kind not in ("max", "sum", "avg") for kind in kinds):
+        raise ValueError("projections must be max, sum, avg (mean is accepted as avg)")
+    return kinds
+
+
+def _project_planes(tif, kind):
+    """ Reduce Z in page order, keeping all other axes. Hold one output and one plane. """
+    series = tif.series[0]
+    z = series.axes.index("Z")
+    shape = series.shape[:z] + series.shape[z + 1:]
+    data = np.zeros(shape, dtype=series.dtype if kind == "max" else np.float32)
+    for k, page in enumerate(tif.pages):
+        position = np.unravel_index(k, series.shape[:-2])
+        target = data[position[:z] + position[z + 1:]]
+        plane = page.asarray()
+        if kind == "max":
+            if position[z] == 0:
+                target[:] = plane
+            else:
+                np.maximum(target, plane, out=target)
+        else:
+            np.add(target, plane, out=target)
+    if kind == "avg":
+        data /= series.shape[z]
+    return data, series.axes.replace("Z", "")
+
+
+def _project_one(source, kind):
+    """ Write and check one projection. None means there is no Z stack. """
+    out = source.parent / "projections" / f"{kind.upper()}_{source.name}"
+    with tifffile.TiffFile(source) as tif:
+        series = tif.series[0]
+        if "Z" not in series.axes or series.shape[series.axes.index("Z")] <= 1:
+            return None
+        if out.exists():
+            return "there"
+        planes = series.shape[series.axes.index("Z")]
+        data, axes = _project_planes(tif, kind)
+    meta = read_metadata(source)
+    word = {"max": "maximum", "sum": "sum", "avg": "average"}[kind]
+    settings = {**meta["settings"], "Projection": f"{word} of {planes} planes along Z"}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_name(out.name + ".part")
+    try:
+        write_ome(part, data, axes, meta["channels"], pixel_size=meta["pixel_size"],
+                  pixel_size_y=meta["pixel_size_y"], time_step=meta["time_step"], metadata=meta["fields"],
+                  settings=settings, leica_xml=meta["leica_xml"], channel_colors=meta["colors"])
+        if not _same_pixels(part, data, axes):
+            part.replace(out.with_name(out.name + ".BAD"))
+            raise ValueError("the pixel check failed, renamed to .BAD")
+        part.replace(out)
+    finally:
+        part.unlink(missing_ok=True)
+    return "written"
+
+
+def _project_outputs(out, kinds, label, result):
+    written, there, errors = [], [], []
+    for kind in kinds:
+        try:
+            state = _project_one(out, kind)
+        except Exception as e:   ## one bad projection does not stop the others
+            reason = f"{kind.upper()} FAILED: {type(e).__name__}: {e}"
+            errors.append(reason)
+            if result is not None:
+                result("FAILED", label, "proj " + reason)
+        else:
+            if state is not None:
+                (written if state == "written" else there).append(kind.upper())
+    parts = [f"{', '.join(names)} {word}" for names, word in ((written, "written"), (there, "there")) if names]
+    return "; ".join(parts + errors), len(errors)
 
 
 def _ome_layout(data, axes, kind):
@@ -184,7 +259,7 @@ def plan(path, only=None, tiles=False, out_dir=None):
 
 
 def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lambda text: None, metadata=None,
-            verbose=False, jobs=None, result=None):
+            verbose=False, jobs=None, result=None, *, projections=()):
     """ Every series of a file as an OME-TIFF (only: that series name only). Each file is read back and compared with
     the pixels that were read from the source. A file that exists is left alone, so a stopped run goes on from the next series. Returns the
     counts {"ok", "there", "skipped", "failed"}.
@@ -195,7 +270,9 @@ def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lam
     metadata: a dict of your own fields, for example {"genotype": "Ecad"}; each new file gets them. Each new file
     also gets the microscope settings and the full Leica XML of its series; writer.read_metadata gives all three back.
     jobs: the result of plan() for this file, when the caller has it already.
-    result: an optional callback receiving (word, label, reason) for each finished series """
+    result: an optional callback receiving (word, label, reason) for each finished series or projection.
+    projections: Z projections to write from each output file: max, sum, avg (or mean). """
+    projections = _projection_kinds(projections)
     jobs = plan(path, only, tiles, out_dir) if jobs is None else jobs
     counts = {"ok": 0, "there": 0, "skipped": 0, "failed": 0}
     width = min(max((len(job[0]) for job in jobs), default=0), 40)
@@ -227,4 +304,11 @@ def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lam
         report(line(word, label, rest))
         if result is not None:
             result(word, label, rest)
+        if projections and key in ("ok", "there"):
+            summary, failed = _project_outputs(out, projections, label, result)
+            counts["failed"] += failed
+            if summary:
+                report(line("proj", label, summary))
+                if result is not None:
+                    result("proj", label, summary)
     return counts

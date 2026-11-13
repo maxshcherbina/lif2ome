@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from . import reader
-from .converter import _gb, _time_left, _took, convert, job_bytes, plan
+from .converter import _gb, _projection_kinds, _time_left, _took, convert, job_bytes, plan
 from .writer import read_metadata
 
 
@@ -14,7 +14,7 @@ def _inspect(path, label):
     """ Prints the metadata of an OME-TIFF that lif2ome wrote, or the settings of each series of a .lif file """
     print(label)
     if str(path).lower().endswith(".lif"):
-        blocks = [(f"Series {name}", reader.read_settings(path, s)) for s, name in enumerate(reader.series_list(path))]
+        blocks = [(f"Series {name}", reader.read_settings(path, s)) for s, name in enumerate(reader.series_paths(path))]
         xml = None
     else:
         meta = read_metadata(path)
@@ -59,6 +59,13 @@ def _status_line(text, width):
     return (text + " ...")[:max(0, width - 1)]
 
 
+def _projections(text):
+    try:
+        return _projection_kinds(text.split(","))
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="lif2ome", description="Convert every series of Leica .lif files to "
                                      "OME-TIFF files, in a folder named after each .lif file, beside it.")
@@ -68,6 +75,8 @@ def main(argv=None):
     parser.add_argument("--tiles", action="store_true", help="write one file per tile of a tile scan; without this, an "
                         "unmerged tile scan is merged into one file")
     parser.add_argument("--out", metavar="FOLDER", type=Path, help="write the files in this folder")
+    parser.add_argument("--projections", type=_projections, default=(), metavar="max,sum,avg",
+                        help="write Z projections: max, sum, avg (mean is accepted as avg)")
     parser.add_argument("--meta", metavar="KEY=VALUE", action="append", default=[],
                         help="a field of your own that each new file gets, for example --meta genotype=Ecad; "
                         "give it more than one time for more fields")
@@ -141,7 +150,8 @@ def main(argv=None):
             report(f"  FAILED    {error}")
             counts = {"failed": 1}
         else:
-            counts = convert(path, args.only, args.tiles, out, report, status, fields, args.verbose, jobs, result=result)
+            counts = convert(path, args.only, args.tiles, out, report, status, fields, args.verbose, jobs,
+                             result=result, projections=args.projections)
         for key, n in counts.items():
             total[key] = total.get(key, 0) + n
         bytes_left, bytes_done, series_done = bytes_left - mine, bytes_done + converted_bytes, series_done + len(jobs)

@@ -51,13 +51,19 @@ def write_ome(path, data, axes, channel_names=None, pixel_size=0.0, z_step=0.0, 
 
 def read_metadata(path):
     """ The fields, settings, Leica XML, channel names (channels) and RGB colours (colors) of an OME-TIFF.
+    Pixel sizes are in µm and time_step is in seconds. Missing sizes are 0.
     Missing metadata is empty. A channel with no colour has None """
-    out = {"fields": {}, "settings": {}, "leica_xml": "", "channels": [], "colors": []}
+    out = {"fields": {}, "settings": {}, "leica_xml": "", "channels": [], "colors": [],
+           "pixel_size": 0.0, "pixel_size_y": 0.0, "z_step": 0.0, "time_step": 0.0}
     with tifffile.TiffFile(path) as tif:
         xml = tif.ome_metadata
     if not xml:
         return out
     for el in ElementTree.fromstring(xml).iter():
+        if el.tag.rsplit("}", 1)[-1] == "Pixels":
+            for key, attr in (("pixel_size", "PhysicalSizeX"), ("pixel_size_y", "PhysicalSizeY"),
+                              ("z_step", "PhysicalSizeZ"), ("time_step", "TimeIncrement")):
+                out[key] = float(el.attrib.get(attr, 0))
         if el.tag.rsplit("}", 1)[-1] == "Channel":
             out["channels"].append(el.attrib.get("Name", ""))
             color = el.attrib.get("Color")

@@ -11,6 +11,7 @@ with the pixels that were read from the `.lif`.
 - Stores your own fields in each file, such as the genotype.
 - Reads every new file back and checks that it holds the same pixels that were read from the `.lif`.
 - Merges a tile scan that LAS X left unmerged into one image.
+- Writes maximum, sum and average projections along Z, on request.
 - Skips files that already exist, so an interrupted run picks up at the next series.
 
 The output is standard OME-TIFF, the format that Fiji, napari, QuPath and bioio read.
@@ -78,6 +79,7 @@ Options:
 | `--tiles` | Write one file per tile of a tile scan, and do not merge it. |
 | `--out FOLDER` | Write the files to this folder. |
 | `--meta genotype=Ecad` | Store your own field in each new file. Repeat the option to add more. |
+| `--projections max,sum,avg` | Also write Z projections of each stack. Any mix of the three. |
 | `--verbose` | Add the axes, the shape, the channels and the pixel sizes under each converted series. |
 | `--inspect` | Convert nothing. Print the metadata of `.ome.tif` files, or the settings of each series in a `.lif`. |
 
@@ -113,6 +115,28 @@ A channel is named after its dye if the `.lif` records one. Otherwise it takes t
 
 The colour that a channel has in LAS X (red, green, blue, gray, cyan, magenta or yellow) is stored with it, so a viewer
 that reads OME channel colours shows the image as LAS X did.
+
+## Projections
+
+`--projections max,sum,avg` writes Z projections of every stack, in a folder `projections` inside the output folder.
+The names start with the prefix that Fiji uses:
+
+```
+My experiment/
+    My experiment - Series001.ome.tif
+    projections/
+        MAX_My experiment - Series001.ome.tif
+        SUM_My experiment - Series001.ome.tif
+        AVG_My experiment - Series001.ome.tif
+```
+
+- The projection runs along Z. Channels and time points are kept.
+- `MAX` keeps the data type of the image. `SUM` and `AVG` are 32-bit float, as in Fiji.
+- A projection file carries the channel names and colours, the pixel size, your fields and the microscope settings
+  of its source, plus a line that says what it is: `Projection  maximum of 15 planes along Z`.
+- Projections are made from the OME-TIFF file, so a later run with the option adds them to files that were converted
+  before, without converting again.
+- A series with a single plane gets no projection.
 
 ## Tile scans
 

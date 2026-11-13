@@ -347,7 +347,8 @@ def test_file_without_metadata(tmp_path):
     f = tmp_path / "x.ome.tif"
     lif2ome.write_ome(f, stack(), "CZYX")
     assert lif2ome.read_metadata(f) == {"fields": {}, "settings": {}, "leica_xml": "",
-                                          "channels": ["", ""], "colors": [None, None]}
+                                      "channels": ["", ""], "colors": [None, None],
+                                      "pixel_size": 0.0, "pixel_size_y": 0.0, "z_step": 0.0, "time_step": 0.0}
 
 
 def test_meta_option(fake, capsys):
@@ -823,3 +824,174 @@ def test_same_series_name_in_two_folders(lif_images, tmp_path):
     assert [j[3].name for j in jobs] == ['f - 20x Images_Position 1.ome.tif', 'f - 40x Images_Position 1.ome.tif']
     assert converter.plan(lif, only='40x Images/Position 1') == [jobs[1]]
     assert '20x Images/Position 1, 40x Images/Position 1' in converter.plan(lif, only='missing')[0][4]
+
+
+@pytest.mark.parametrize('only, series, shape, axes', [
+    ('A', 0, (3, 2, 8, 8), 'ZCYX'),
+    ('Both', 4, (2, 3, 2, 8, 8), 'TZCYX'),
+])
+def test_projections_values_and_resume(fake, only, series, shape, axes):
+    lif, reads = fake
+    lines, results = [], []
+    kinds = ('max', 'sum', 'avg')
+    counts = lif2ome.convert(lif, only=only, projections=kinds, report=lines.append,
+                             result=lambda *args: results.append(args))
+    assert counts == {'ok': 2 if only == 'A' else 1, 'there': 0, 'skipped': 0, 'failed': 0}
+    source = lif2ome.out_path(lif, only)
+    folder = source.parent / 'projections'
+    assert sorted(p.name for p in folder.iterdir()) == sorted(f'{k.upper()}_{source.name}' for k in kinds)
+    data = stack(shape) + series
+    expected = [data.max(axis=axes.index('Z')), data.sum(axis=axes.index('Z'), dtype=np.float32),
+                data.mean(axis=axes.index('Z'), dtype=np.float32)]
+    for kind, want in zip(kinds, expected):
+        with tifffile.TiffFile(folder / f'{kind.upper()}_{source.name}') as tif:
+            assert tif.series[0].axes == axes.replace('Z', '')
+            assert tif.series[0].dtype == (np.uint16 if kind == 'max' else np.float32)
+            np.testing.assert_array_equal(tif.asarray(), want)
+    assert lines[1].split()[:2] == ['proj', only]
+    assert 'MAX, SUM, AVG written' in lines[1]
+    assert results[1] == ('proj', only, 'MAX, SUM, AVG written')
+    before = {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in source.parent.rglob('*.ome.tif')}
+    reads.clear()
+    lines.clear()
+    counts = lif2ome.convert(lif, only=only, projections=kinds, report=lines.append)
+    assert counts['there'] == (2 if only == 'A' else 1) and counts['failed'] == 0
+    assert reads == []
+    assert 'MAX, SUM, AVG there' in lines[1]
+    assert before == {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in before}
+
+
+def test_existing_file_gets_projections_and_metadata(fake, monkeypatch):
+    lif, reads = fake
+    jobs = converter.plan(lif, only='Both')
+    jobs[0][1].pixel_size_y = 0.3
+    jobs[0][1].time_step = 2.5
+    lif2ome.convert(lif, jobs=jobs, metadata={'sample': 'old'}, report=lambda line: None)
+    source = jobs[0][3]
+    original = lif2ome.read_metadata(source)
+    reads.clear()
+    def no_stack(*args, **kwargs):
+        raise AssertionError('a whole TIFF stack was read')
+    monkeypatch.setattr(tifffile.TiffPageSeries, 'asarray', no_stack)
+    lines = []
+    assert lif2ome.convert(lif, jobs=jobs, projections=('max', 'sum', 'mean'), metadata={'sample': 'new'},
+                           report=lines.append) == {'ok': 0, 'there': 1, 'skipped': 0, 'failed': 0}
+    assert reads == [] and lines[0].split()[0] == 'there'
+    for kind, word in [('MAX', 'maximum'), ('SUM', 'sum'), ('AVG', 'average')]:
+        path = source.parent / 'projections' / f'{kind}_{source.name}'
+        meta = lif2ome.read_metadata(path)
+        for key in ('channels', 'colors', 'fields', 'leica_xml', 'pixel_size', 'pixel_size_y', 'time_step'):
+            assert meta[key] == original[key]
+        assert meta['settings'] == {**original['settings'], 'Projection': f'{word} of 3 planes along Z'}
+        assert meta['z_step'] == 0
+        with tifffile.TiffFile(path) as tif:
+            assert 'PhysicalSizeZ' not in tif.ome_metadata
+    (source.parent / 'projections' / f'MAX_{source.name}').unlink()
+    lines.clear()
+    lif2ome.convert(lif, jobs=jobs, projections=('max', 'avg'), report=lines.append)
+    assert 'MAX written; AVG there' in lines[1]
+
+
+@pytest.mark.parametrize('axes, shape', [('CYX', (2, 4, 5)), ('CZYX', (2, 1, 4, 5)),
+                                         ('TCZYX', (3, 2, 1, 4, 5))])
+def test_no_projection_without_z_stack(lif_images, tmp_path, axes, shape):
+    lif_images(axes, shape, {'C': ['a', 'b']})
+    lines = []
+    assert lif2ome.convert(tmp_path / 'f.lif', projections=('max', 'sum', 'avg'), report=lines.append)['ok'] == 1
+    assert len(lines) == 1
+    assert not (tmp_path / 'f' / 'projections').exists()
+
+
+@pytest.mark.parametrize('failure', ['check', 'write', 'read'])
+def test_projection_failure_continues(fake, monkeypatch, failure):
+    lif, _ = fake
+    check, write = converter._same_pixels, converter.write_ome
+    def checked(path, data, axes):
+        if path.name.startswith('MAX_') and 'Both' not in path.name:
+            assert path.name.endswith('.part') and path.exists()
+            assert not path.with_suffix('').exists()
+            if failure == 'read':
+                raise OSError('cannot read projection')
+            if failure == 'check':
+                return False
+        return check(path, data, axes)
+    def written(path, *args, **kwargs):
+        if failure == 'write' and path.name.startswith('MAX_') and 'Both' not in path.name:
+            raise OSError('cannot write projection')
+        return write(path, *args, **kwargs)
+    monkeypatch.setattr(converter, '_same_pixels', checked)
+    monkeypatch.setattr(converter, 'write_ome', written)
+    lines, results = [], []
+    counts = lif2ome.convert(lif, projections=('max', 'sum'), report=lines.append,
+                             result=lambda *args: results.append(args))
+    assert counts == {'ok': 3, 'there': 0, 'skipped': 2, 'failed': 1}
+    folder = lif.with_suffix('') / 'projections'
+    assert not (folder / 'MAX_f - A.ome.tif').exists()
+    assert (folder / 'SUM_f - A.ome.tif').exists()
+    assert (folder / 'MAX_f - Both.ome.tif').exists()
+    assert not list(folder.glob('*.part'))
+    assert 'MAX FAILED:' in lines[1] and 'SUM written' in lines[1]
+    assert any(word == 'FAILED' and 'proj MAX FAILED' in reason for word, _, reason in results)
+    assert len([line for line in lines if line.split()[0] == 'proj']) == 2
+
+
+@pytest.mark.parametrize('value', ['median', '', 'max,', 'max,other'])
+def test_projection_argparse_error(fake, capsys, value):
+    with pytest.raises(SystemExit) as error:
+        lif2ome.main([str(fake[0]), '--projections', value])
+    assert error.value.code == 2
+    assert 'max, sum, avg' in capsys.readouterr().err
+    with pytest.raises(ValueError, match='max, sum, avg'):
+        lif2ome.convert(fake[0], projections=(value,))
+
+
+def test_projection_cli_and_inspect_heading(fake, capsys):
+    lif, _ = fake
+    assert lif2ome.main([str(lif), '--only', 'Both', '--projections', 'max,sum,mean']) == 0
+    assert 'MAX, SUM, AVG written' in capsys.readouterr().out
+    assert lif2ome.main([str(lif), '--inspect']) == 0
+    assert '  Series 20x Images/XZ\n' in capsys.readouterr().out
+
+
+def test_projection_of_merged_stack(fake, monkeypatch):
+    lif, _ = fake
+    jobs = converter.plan(lif, only='Tiles', tiles=True)
+    label, info, _, out, _ = jobs[0]
+    jobs = [(label, info, {'tiles': [0, 1], 'positions': [(0, 0), (8, 0)]}, out, None)]
+    def fixed_place(positions, pictures):
+        return np.array(positions, dtype=int), 0, 0
+    monkeypatch.setattr(stitch, 'place', fixed_place)
+    assert lif2ome.convert(lif, jobs=jobs, projections=('max', 'sum', 'avg'), report=lambda line: None)['ok'] == 1
+    data = tifffile.imread(out)
+    assert data.shape == (2, 3, 8, 16)
+    for kind, reduce in [('max', np.max), ('sum', np.sum), ('avg', np.mean)]:
+        projected = tifffile.imread(out.parent / 'projections' / f'{kind.upper()}_{out.name}')
+        np.testing.assert_array_equal(projected, reduce(data, axis=1))
+
+
+def test_failed_series_gets_no_projection(fake, monkeypatch):
+    lif, _ = fake
+    monkeypatch.setattr(converter, '_convert_one', lambda *args: (False, 'broken', ''))
+    def unexpected(*args):
+        pytest.fail('a failed series must not get a projection')
+    monkeypatch.setattr(converter, '_project_one', unexpected)
+    lines = []
+    assert lif2ome.convert(lif, only='Both', projections=('max',), report=lines.append)['failed'] == 1
+    assert len(lines) == 1 and 'FAILED' in lines[0]
+
+
+@pytest.mark.parametrize('axes, shape', [('ZYX', (3, 4, 5)), ('TZCYX', (2, 3, 2, 4, 5))])
+def test_projection_uses_saved_axes_and_signed_values(fake, axes, shape):
+    lif, reads = fake
+    jobs = converter.plan(lif, only='Both')
+    source = jobs[0][3]
+    source.parent.mkdir()
+    data = -stack(shape, dtype=np.int16) - 1
+    lif2ome.write_ome(source, data, axes)
+    assert lif2ome.convert(lif, jobs=jobs, projections=('max', 'sum', 'avg'), report=lambda line: None)['there'] == 1
+    assert reads == []
+    for kind, reduce in [('max', np.max), ('sum', np.sum), ('avg', np.mean)]:
+        path = source.parent / 'projections' / f'{kind.upper()}_{source.name}'
+        actual = tifffile.imread(path)
+        assert actual.dtype == (np.int16 if kind == 'max' else np.float32)
+        np.testing.assert_array_equal(actual, reduce(data, axis=axes.index('Z')))
