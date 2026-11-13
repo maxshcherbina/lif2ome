@@ -2,6 +2,7 @@
 A real file: LIF2OME_TEST_LIF=/path/to/file.lif uv run pytest"""
 import os
 from pathlib import Path
+from xml.etree import ElementTree
 
 import numpy as np
 import pytest
@@ -90,7 +91,7 @@ def fake(monkeypatch, tmp_path):
             raise reader.Unsupported("tile scan with 3 tiles, skipped; convert the merged series")
         return lif2ome.ImageInfo(str(path), axes, shape, lif2ome.guess_kind(axes, shape), ["a", "b"], series=s,
                                  series_name=name, dtype="uint16", pixel_size=0.1, z_step=0.5,
-                                 tiles=3 if name == "Tiles" else 0)
+                                 tiles=3 if name == "Tiles" else 0, colors=[(0, 0, 255), (0, 255, 0)])
 
     def read_series(info, tile=None):
         reads.append((info.series, tile))
@@ -99,6 +100,8 @@ def fake(monkeypatch, tmp_path):
         return np.transpose(data, [info.axes.index(ax) for ax in axes]), axes
 
     monkeypatch.setattr(reader, "series_list", lambda path: [v[0] for v in series.values()])
+    monkeypatch.setattr(reader, "series_paths", lambda path: ["20x Images/XZ" if n == "XZ" else n
+                                                            for n in reader.series_list(path)])
     monkeypatch.setattr(reader, "read_info", read_info)
     monkeypatch.setattr(reader, "read_series", read_series)
     def no_positions(path, s):
@@ -119,7 +122,7 @@ def test_convert(fake):
     assert names == ["f - A (2).ome.tif", "f - A.ome.tif", "f - Both.ome.tif"]
     assert lines[0].split()[:2] == ["ok", "A"] and " -> " in lines[0] and "CZYX" not in lines[0]
     assert "left" in lines[0] and "left" not in lines[-1]
-    assert lines[2].split()[:2] == ["skipped", "XZ"] and "axes L, X" in lines[2]
+    assert lines[2].split()[:2] == ["skipped", "20x"] and "axes L, X" in lines[2]
     assert lines[3].split()[:2] == ["skipped", "Tiles"] and "tile scan with 3 tiles" in lines[3]
     assert lines[1].index("A (2)") == lines[0].index("A")   ## the names start in one column
     with tifffile.TiffFile(lif.parent / "f" / "f - Both.ome.tif") as tif:
@@ -214,7 +217,7 @@ def test_only_missing_name_fails(fake, capsys):
         "ok": 0, "there": 0, "skipped": 0, "failed": 1}
     assert len(lines) == 1
     assert "no series has the name 'missing'" in lines[0]
-    assert "A, A, XZ, Tiles, Both" in lines[0]
+    assert "A, A, 20x Images/XZ, Tiles, Both" in lines[0]
     assert reads == []
     assert lif2ome.main([str(lif), "--only", "missing"]) == 1
     assert "1 failed" in capsys.readouterr().out
@@ -253,6 +256,7 @@ def test_metadata_round_trip(fake, capsys):
     lif2ome.convert(lif, only="Both", report=lambda line: None, metadata={"genotype": "Ecad <Lariat>", "trial": 1})
     f = lif.parent / "f" / "f - Both.ome.tif"
     meta = lif2ome.read_metadata(f)
+    assert meta["colors"] == [(0, 0, 255), (0, 255, 0)]
     assert meta["fields"] == {"genotype": "Ecad <Lariat>", "trial": "1"}
     assert meta["settings"] == {"Series": "Both", "Zoom": "0.75"}
     assert meta["leica_xml"] == '<Element Name="Both"><A b="1 &lt; 2">é\n</A></Element>'
@@ -265,7 +269,8 @@ def test_metadata_round_trip(fake, capsys):
 def test_file_without_metadata(tmp_path):
     f = tmp_path / "x.ome.tif"
     lif2ome.write_ome(f, stack(), "CZYX")
-    assert lif2ome.read_metadata(f) == {"fields": {}, "settings": {}, "leica_xml": ""}
+    assert lif2ome.read_metadata(f) == {"fields": {}, "settings": {}, "leica_xml": "",
+                                          "channels": ["", ""], "colors": [None, None]}
 
 
 def test_meta_option(fake, capsys):
@@ -308,7 +313,7 @@ def test_folder(fake, tmp_path, capsys):
 
     assert lif2ome.main([str(root)]) == 0   ## all series: the fake file has two that are skipped
     out = capsys.readouterr().out
-    assert "sub/a.LIF: XZ: skipped, axes L, X" in out
+    assert "sub/a.LIF: 20x Images/XZ: skipped, axes L, X" in out
     assert "file done: 2 converted, 1 already there, 2 skipped in" in out and "Total: 10 of 10 series" in out
 
     lif2ome.main([str(root), "--only", "Both", "--out", str(tmp_path / "o")])
@@ -420,7 +425,7 @@ def test_only_across_files(fake, monkeypatch, capsys):
     assert 'left' not in text.split('Total:')[-1]
     assert lif2ome.main([str(other), str(lif), '--only', 'missing']) == 1
     text = capsys.readouterr().out
-    assert 'Series names: Else' in text and 'Series names: A, A, XZ, Tiles, Both' in text
+    assert 'Series names: Else' in text and 'Series names: A, A, 20x Images/XZ, Tiles, Both' in text
     assert '2 failed' in text
 
 
@@ -448,9 +453,9 @@ def lif_images(monkeypatch):
         def close(self):
             pass
     monkeypatch.setattr(reader.liffile, 'LifFile', File)
-    def add(dims, shape, coords=None, xml='<Element/>'):
+    def add(dims, shape, coords=None, xml='<Element/>', path='Test'):
         data = stack(shape)
-        im = SimpleNamespace(name='Test', dims=tuple(dims), shape=shape, dtype=data.dtype,
+        im = SimpleNamespace(name=path.rsplit('/', 1)[-1], path=path, dims=tuple(dims), shape=shape, dtype=data.dtype,
                              coords=coords or {}, xml_element=ElementTree.fromstring(xml),
                              timestamps=None, asarray=lambda: data)
         images.append(im)
@@ -515,6 +520,7 @@ def test_reader_channel_names(lif_images, coords, channels, expected):
     im, s = lif_images('CYX' if coords else 'YX', (2, 4, 5) if coords else (4, 5), coords, xml)
     assert reader._lif_channel_names(im) == expected
     assert reader.read_info('f.lif', s).channels == expected
+    assert len(reader.read_info('f.lif', s).colors) == len(expected)
 
 
 def test_reader_movie_and_axes_refusal(lif_images):
@@ -638,7 +644,7 @@ def test_convert_merges_a_tile_scan(fake, monkeypatch, capsys):
     lif, reads = fake
     scene, nominal, true, tiles = scene_and_tiles()
     info = lif2ome.ImageInfo(str(lif), "CYX", (1, 64, 64), "image", ["a"], series_name="Scan", dtype="uint8",
-                             pixel_size=0.5, tiles=10)
+                             pixel_size=0.5, tiles=10, colors=[(0, 0, 255)])
     monkeypatch.setattr(reader, "series_list", lambda path: ["Scan"])
     monkeypatch.setattr(reader, "read_info", lambda path, s, tiles=False: info)
     monkeypatch.setattr(reader, "read_series", lambda info, tile=None: (tiles[min(tile, 8)][np.newaxis], "CYX"))
@@ -654,6 +660,7 @@ def test_convert_merges_a_tile_scan(fake, monkeypatch, capsys):
     merged = tifffile.imread(lif.parent / "f" / "f - Scan.ome.tif")
     x0, y0 = min(x for x, _ in true), min(y for _, y in true)
     assert np.array_equal(np.squeeze(merged)[true[4][1] - y0:true[4][1] - y0 + 64, true[4][0] - x0:true[4][0] - x0 + 64], tiles[4])
+    assert lif2ome.read_metadata(lif.parent / "f" / "f - Scan.ome.tif")["colors"] == [(0, 0, 255)]
     assert "merged by lif2ome" in lif2ome.read_metadata(lif.parent / "f" / "f - Scan.ome.tif")["settings"]["Tile scan"]
 
 
@@ -666,3 +673,76 @@ def test_a_tile_scan_with_a_merged_copy_is_skipped(fake, monkeypatch):
     lines = []
     assert lif2ome.convert(lif, report=lines.append) == {"ok": 1, "there": 0, "skipped": 1, "failed": 0}
     assert lines[0].split()[0] == "skipped" and "the file has the merged series 'Scan_Merged'" in lines[0]
+
+
+@pytest.mark.parametrize("luts, expected", [
+    (["bLuE", "GREEN", "unknown"], [(0, 0, 255), (0, 255, 0), None]),
+    (["gRaY"], [(255, 255, 255)]),
+    (["Red", "Cyan", "Magenta", "Yellow"], [(255, 0, 0), (0, 255, 255), (255, 0, 255), (255, 255, 0)]),
+])
+def test_reader_channel_colors(lif_images, luts, expected):
+    channels = ''.join(f'<ChannelDescription BytesInc="{i}" LUTName="{lut}"/>'
+                       for i, lut in reversed(list(enumerate(luts))))
+    xml = f'<Element><Data><Image><ImageDescription><Channels>{channels}</Channels></ImageDescription></Image></Data></Element>'
+    _, s = lif_images('CYX' if len(luts) > 1 else 'YX',
+                      (len(luts), 4, 5) if len(luts) > 1 else (4, 5), xml=xml)
+    info = reader.read_info('f.lif', s)
+    assert info.channels == luts
+    assert info.colors == expected
+
+
+def test_channel_colors_round_trip_and_inspect(tmp_path, capsys):
+    path = tmp_path / 'colors.ome.tif'
+    names = ['Red', 'GFP', 'DAPI', 'White', 'Custom', 'Unknown']
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255), (12, 34, 56), None]
+    lif2ome.write_ome(path, stack((6, 4, 5)), 'CYX', names, channel_colors=colors)
+    with tifffile.TiffFile(path) as tif:
+        channels = ElementTree.fromstring(tif.ome_metadata).findall('.//{*}Channel')
+    assert [c.get('Color') for c in channels] == ['-16776961', '16711935', '65535', '-1', '203569407', None]
+    assert lif2ome.read_metadata(path)['colors'] == colors
+    assert lif2ome.main(['--inspect', str(path)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert '  Channels' in lines
+    assert [line.split() for line in lines[2:8]] == [
+        ['Red', 'red'], ['GFP', 'green'], ['DAPI', 'blue'], ['White', 'gray'],
+        ['Custom', '12,', '34,', '56'], ['Unknown']]
+
+
+@pytest.mark.parametrize('colors', [None, [], [None, None]])
+def test_no_channel_colors(tmp_path, colors):
+    path = tmp_path / 'plain.ome.tif'
+    lif2ome.write_ome(path, stack(), 'CZYX', ['a', 'b'], channel_colors=colors)
+    with tifffile.TiffFile(path) as tif:
+        assert 'Color=' not in tif.ome_metadata
+    assert lif2ome.read_metadata(path)['colors'] == [None, None]
+
+
+def test_series_paths(lif_images, monkeypatch):
+    lif_images('YX', (4, 5), path='20x Images/Position 3')
+    lif_images('YX', (4, 5), path='Position 4')
+    assert lif2ome.series_list('f.lif') == ['Position 3', 'Position 4']
+    assert lif2ome.series_paths('f.lif') == ['20x Images/Position 3', 'Position 4']
+    assert reader.read_settings('f.lif')['Series'] == '20x Images/Position 3'
+    from types import SimpleNamespace
+    monkeypatch.setattr(reader, '_bioio_image', lambda path: SimpleNamespace(scenes=['Scene 1', 'Scene 2']))
+    assert reader.series_paths('f.czi') == reader.series_list('f.czi')
+
+
+@pytest.mark.parametrize('only', ['Position 3', '20x Images/Position 3', '20x Images_Position 3'])
+def test_folder_series_conversion(lif_images, tmp_path, capsys, only):
+    lif_images('YX', (4, 5), path='20x Images/Position 3')
+    lif = tmp_path / 'f.lif'
+    assert lif2ome.main([str(lif), '--only', only]) == 0
+    assert (tmp_path / 'f' / 'f - 20x Images_Position 3.ome.tif').exists()
+    assert '20x Images/Position 3' in capsys.readouterr().out
+
+
+def test_same_series_name_in_two_folders(lif_images, tmp_path):
+    for folder in ['20x Images', '40x Images']:
+        lif_images('YX', (4, 5), path=f'{folder}/Position 1')
+    lif = tmp_path / 'f.lif'
+    jobs = converter.plan(lif, only='Position 1')
+    assert [j[0] for j in jobs] == ['20x Images/Position 1', '40x Images/Position 1']
+    assert [j[3].name for j in jobs] == ['f - 20x Images_Position 1.ome.tif', 'f - 40x Images_Position 1.ome.tif']
+    assert converter.plan(lif, only='40x Images/Position 1') == [jobs[1]]
+    assert '20x Images/Position 1, 40x Images/Position 1' in converter.plan(lif, only='missing')[0][4]

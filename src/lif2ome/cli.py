@@ -18,6 +18,12 @@ def _inspect(path, label):
         xml = None
     else:
         meta = read_metadata(path)
+        print("  Channels")
+        words = {rgb: name for name, rgb in reader.COLORS.items()}
+        width = max((len(name) for name in meta["channels"]), default=0)
+        for name, color in zip(meta["channels"], meta["colors"]):
+            text = words.get(color, ", ".join(map(str, color))) if color is not None else ""
+            print(f"    {name:<{width}}  {text}".rstrip())
         blocks, xml = [("Your fields", meta["fields"]), ("Microscope settings", meta["settings"])], meta["leica_xml"]
     for title, pairs in blocks:
         print(f"  {title}" + ("" if pairs else ": none"))

@@ -6,7 +6,7 @@ with the pixels that were read from the `.lif`.
 ## Features
 
 - Writes one OME-TIFF per series, with every channel. Compression is zlib, so no pixel value changes.
-- Stores the pixel size, the Z step, the time between frames and the channel names in each file.
+- Stores the pixel size, the Z step, the time between frames, and the name and colour of each channel in each file.
 - Keeps the microscope settings: each file carries the full Leica XML of its series, plus a short summary you can read.
 - Stores your own fields in each file, such as the genotype.
 - Reads every new file back and checks that it holds the same pixels that were read from the `.lif`.
@@ -93,6 +93,8 @@ My experiment/
     My experiment - TileScan 1 - tile 01.ome.tif     (with --tiles only)
 ```
 
+- A series inside a folder of the `.lif` carries the folder in its name: the series `Position 3` in the folder
+  `20x Images` becomes `My experiment - 20x Images_Position 3.ome.tif`.
 - Characters that are not allowed in file names (`< > : " / \ | ? *`) become `_`.
 - If two series share a name, the second file gets ` (2)` appended.
 - A file that fails the pixel check is renamed to end in `.ome.tif.BAD`.
@@ -108,6 +110,9 @@ My experiment/
 
 A channel is named after its dye if the `.lif` records one. Otherwise it takes the channel colour from LAS X, such as
 `Green`. With neither, it is `Channel 1`, `Channel 2`, and so on.
+
+The colour that a channel has in LAS X (red, green, blue, gray, cyan, magenta or yellow) is stored with it, so a viewer
+that reads OME channel colours shows the image as LAS X did.
 
 ## Tile scans
 
@@ -159,6 +164,9 @@ lif2ome --inspect "My experiment/My experiment - Series001.ome.tif"
 
 ```
 My experiment - Series001.ome.tif
+  Channels
+    DAPI   blue
+    Green  green
   Your fields
     genotype  Ecad
   Microscope settings

@@ -24,6 +24,7 @@ from .reader import (
            read_settings,
            read_xml,
            series_list,
+           series_paths,
            to_cnyx,
 )
 from .writer import read_metadata, write_ome
@@ -42,6 +43,7 @@ __all__ = [
            "read_settings",
            "read_xml",
            "series_list",
+           "series_paths",
            "to_cnyx",
            "write_ome",
 ]

@@ -89,7 +89,7 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
     if merged:
         settings["Tile scan"] = merged
     write_ome(part, data, axes, info.channels, info.pixel_size, info.z_step, metadata, settings,
-              reader.read_xml(info.path, info.series), info.pixel_size_y, info.time_step)
+              reader.read_xml(info.path, info.series), info.pixel_size_y, info.time_step, channel_colors=info.colors)
     ## ponytail: the check holds the series twice in memory; compare plane by plane if a series outgrows the memory
     status("checking the pixels (step 3 of 3)")
     if not _same_pixels(part, data, axes):
@@ -131,6 +131,7 @@ def plan(path, only=None, tiles=False, out_dir=None):
     path = Path(path)
     jobs, selected, used = [], [], set()
     names = reader.series_list(path)
+    paths = reader.series_paths(path)
 
     def unique(label):
         base, n = label, 1
@@ -140,13 +141,13 @@ def plan(path, only=None, tiles=False, out_dir=None):
         used.add(str(out_path(path, label, out_dir)).casefold())
         return label
 
-    for s, name in enumerate(names):
-        label = unique(name)
+    for s, (name, series_path) in enumerate(zip(names, paths)):
+        label = unique(series_path)
         try:
             info = reader.read_info(path, s, True)
             numbers, merge = (range(info.tiles) if info.tiles else [None]), None
             if info.tiles and not tiles:
-                copy = next((n for n in names if n != name and n.startswith(name) and "merg" in n.lower()), None)
+                copy = next((n for n in paths if n != series_path and n.startswith(series_path) and "merg" in n.lower()), None)
                 if copy:
                     raise reader.Unsupported(f"tile scan with {info.tiles} tiles; the file has the merged series {copy!r}")
                 try:
@@ -169,11 +170,11 @@ def plan(path, only=None, tiles=False, out_dir=None):
                 full = label if tile is None else unique(f"{label} - tile {tile + 1:0{width}d}")
                 series_jobs.append((full, info, tile, out_path(path, full, out_dir), None))
         jobs.extend(series_jobs)
-        selected.extend(j for j in series_jobs if only in (name, label, j[0]))
+        selected.extend(j for j in series_jobs if only in (name, series_path, series_path.replace("/", "_"), label, j[0]))
     if only is None:
         return jobs
     return selected or [(only, None, None, None,
-                         f"FAILED: no series has the name {only!r}. Series names: {', '.join(names)}")]
+                         f"FAILED: no series has the name {only!r}. Series names: {', '.join(paths)}")]
 
 
 def convert(path, only=None, tiles=False, out_dir=None, report=print, status=lambda text: None, metadata=None,

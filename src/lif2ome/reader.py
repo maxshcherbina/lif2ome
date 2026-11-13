@@ -13,6 +13,8 @@ import numpy as np
 
 KINDS = {"stack": "3D stack", "movie": "2D movie", "image": "2D image"}
 OME_ORDER = "TCZYX"
+COLORS = {"red": (255, 0, 0), "green": (0, 255, 0), "blue": (0, 0, 255),
+          "gray": (255, 255, 255), "cyan": (0, 255, 255), "magenta": (255, 0, 255), "yellow": (255, 255, 0)}
 
 
 class Unsupported(ValueError):
@@ -36,6 +38,7 @@ class ImageInfo:
     time_step: float = 0.0    ## the time between frames in seconds; 0: not known or no T axis
     z_step: float = 0.0       ## the Z step in µm; 0: not known or no Z axis
     tiles: int = 0            ## the number of tiles of a tile scan; 0: not a tile scan
+    colors: list = field(default_factory=list)
 
     @property
     def n(self):
@@ -81,6 +84,14 @@ def series_list(path):
     return [str(s) for s in _bioio_image(path).scenes]
 
 
+def series_paths(path):
+    """ The path of each series inside the file, including its folders """
+    if _is_lif(path):
+        with liffile.LifFile(path) as lif:
+            return [im.path for im in lif.images]
+    return series_list(path)
+
+
 def read_info(path, series=0, tiles=False):
     """ What one series holds. Raises Unsupported, with a sentence for the user, for a series this library does not
     convert: a series with other axes than T, Z, C, Y, X, and a tile scan unless tiles is True.
@@ -109,7 +120,8 @@ def read_info(path, series=0, tiles=False):
             raise Unsupported(f"axes {', '.join(im.dims)}: only T, Z, C, Y and X are read, with planes of Y by X or Z by X")
         return ImageInfo(path, axes, shape, guess_kind(axes, shape), _lif_channel_names(im),
                          z / x if z and x else 1.0, series, series_name=im.name, dtype=str(im.dtype), notes=notes,
-                         pixel_size=x * 1e6, pixel_size_y=y * 1e6, z_step=z * 1e6, time_step=t, tiles=n_tiles)
+                         pixel_size=x * 1e6, pixel_size_y=y * 1e6, z_step=z * 1e6, time_step=t, tiles=n_tiles,
+                         colors=_lif_channel_colors(im))
 
 
 def cross_section_axes(axes):
@@ -200,7 +212,7 @@ def read_settings(path, series=0):
     if not _is_lif(path):
         return out
     with _lif_image(str(path), series) as im:
-        out["Series"] = im.name
+        out["Series"] = im.path
         ## ponytail: the XML differs between microscopes and LAS X versions, so a part that is absent or odd is left
         ## out of the short list; the full XML is in the file in every case
         try:
@@ -305,11 +317,21 @@ def _lif_step(coords, axis):
     return abs(float(values[-1]) - float(values[0])) / (len(values) - 1) if values is not None and len(values) > 1 else 0
 
 
+def _lif_channels(im):
+    return sorted(im.xml_element.findall("./Data/Image/ImageDescription/Channels/ChannelDescription"),
+                  key=lambda c: int(c.attrib.get("BytesInc", 0)))   ## liffile's channel order
+
+
+def _lif_channel_colors(im):
+    colors = [COLORS.get(c.attrib.get("LUTName", "").lower()) for c in _lif_channels(im)]
+    count = len(_lif_channel_names(im))
+    return (colors + [None] * count)[:count]
+
+
 def _lif_channel_names(im):
     """ The dye name when the file has one, else the colour of the channel in LAS X (its LUT, for example Green),
     else Channel n. liffile names a channel with no dye Ch0, Ch1... """
-    described = sorted(im.xml_element.findall("./Data/Image/ImageDescription/Channels/ChannelDescription"),
-                       key=lambda c: int(c.attrib.get("BytesInc", 0)))   ## liffile's channel order
+    described = _lif_channels(im)
     names = []
     channels = im.coords.get("C")
     if channels is None:
