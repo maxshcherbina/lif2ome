@@ -1,6 +1,7 @@
 """No test needs a microscope file: convert() runs on a made-up file through a patched reader.
 A real file: LIF2OME_TEST_LIF=/path/to/file.lif uv run pytest"""
 import os
+import tracemalloc
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -48,6 +49,70 @@ def test_pixel_check_finds_one_wrong_pixel(tmp_path):
     assert not converter._same_pixels(f, data.astype(np.uint32), "CZYX")
 
 
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+@pytest.mark.parametrize("bigtiff", [False, True])
+@pytest.mark.parametrize("axes, shape", [
+    ("YX", (8, 9)),
+    ("ZYX", (3, 8, 9)),
+    ("CZYX", (2, 3, 8, 9)),
+    ("CTYX", (2, 3, 8, 9)),
+    ("TCZYX", (2, 3, 4, 8, 9)),
+    ("TCZYX", (1, 2, 1, 8, 9)),
+])
+def test_pixel_check_page_order(tmp_path, dtype, bigtiff, axes, shape):
+    data, f = stack(shape, dtype), tmp_path / "pages.ome.tif"
+    # Match write_ome's options, forcing BigTIFF without a multi-GB fixture.
+    tifffile.imwrite(f, data, ome=True, compression="zlib", photometric="minisblack",
+                     metadata={"axes": axes}, bigtiff=bigtiff)
+    planes = data.reshape(-1, *shape[-2:])
+    with tifffile.TiffFile(f) as tif:
+        assert tif.is_bigtiff == bigtiff
+        assert len(tif.pages) == len(planes)
+        for page, plane in zip(tif.pages, planes):
+            assert page.dtype == data.dtype
+            np.testing.assert_array_equal(page.asarray(), plane)
+    assert converter._same_pixels(f, data, axes)
+
+
+def test_pixel_check_finds_wrong_last_pixel(tmp_path):
+    data, f = stack(), tmp_path / "x.ome.tif"
+    lif2ome.write_ome(f, data, "CZYX")
+    data[-1, -1, -1, -1] += 1
+    assert not converter._same_pixels(f, data, "CZYX")
+
+
+@pytest.mark.parametrize("planes", [2, 4])
+def test_pixel_check_rejects_plane_count(tmp_path, planes):
+    data, f = np.zeros((3, 8, 9), dtype=np.uint16), tmp_path / "x.ome.tif"
+    lif2ome.write_ome(f, data, "ZYX")
+    assert not converter._same_pixels(f, np.zeros((planes, 8, 9), dtype=data.dtype), "ZYX")
+
+
+def test_pixel_check_rejects_dtype(tmp_path):
+    data, f = stack(dtype=np.uint8), tmp_path / "x.ome.tif"
+    lif2ome.write_ome(f, data, "CZYX")
+    assert not converter._same_pixels(f, data.astype(np.uint16), "CZYX")
+
+
+def test_pixel_check_rejects_plane_shape(tmp_path):
+    data, f = stack((3, 8, 9)), tmp_path / "x.ome.tif"
+    lif2ome.write_ome(f, data, "ZYX")
+    assert not converter._same_pixels(f, data.reshape(3, 9, 8), "ZYX")
+
+
+def test_pixel_check_memory_is_less_than_a_series(tmp_path):
+    data = np.zeros((32, 1024, 1024), dtype=np.uint16)  # 64 MiB, 2 MiB per plane
+    f = tmp_path / "large.ome.tif"
+    lif2ome.write_ome(f, data, "ZYX")
+    tracemalloc.start()
+    try:
+        assert converter._same_pixels(f, data, "ZYX")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 16 * 1024**2, f"pixel check allocated {peak / 1024**2:.1f} MiB"
+
+
 @pytest.mark.parametrize("axes, shape, kind, want, want_shape", [
     ("CZYX", (2, 3, 8, 8), "stack", "CZYX", (2, 3, 8, 8)),
     ("ZYX", (3, 8, 8), "stack", "CZYX", (1, 3, 8, 8)),
@@ -62,6 +127,18 @@ def test_layout_and_round_trip(tmp_path, axes, shape, kind, want, want_shape):
     f = tmp_path / "x.ome.tif"
     lif2ome.write_ome(f, data, out_axes)
     assert converter._same_pixels(f, data, out_axes)
+
+
+@pytest.mark.parametrize("axes, shape, kind", [
+    ("TCZYX", (1, 2, 3, 8, 9), "stack"),
+    ("TCZYX", (4, 1, 1, 8, 9), "movie"),
+])
+def test_layout_removes_singleton_axes_without_copy(axes, shape, kind):
+    data = stack(shape)
+    laid_out, _ = converter._ome_layout(data, axes, kind)
+    assert laid_out.flags.c_contiguous
+    assert np.shares_memory(laid_out, data)
+    np.testing.assert_array_equal(laid_out.ravel(), data.ravel())
 
 
 def test_out_path():

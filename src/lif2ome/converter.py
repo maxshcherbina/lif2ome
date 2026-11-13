@@ -19,22 +19,28 @@ def _ome_layout(data, axes, kind):
     else:
         want = "CTYX" if kind == "movie" else "CZYX"
     for ax in [a for a in axes if a not in want]:   ## a T or Z axis of size 1
-        data, axes = np.take(data, 0, axis=axes.index(ax)), axes.replace(ax, "")
+        data, axes = np.squeeze(data, axis=axes.index(ax)), axes.replace(ax, "")
     for ax in [a for a in want if a not in axes]:
         data, axes = data[np.newaxis], ax + axes
     return np.ascontiguousarray(np.transpose(data, [axes.index(ax) for ax in want])), want
 
 
 def _same_pixels(path, data, axes):
-    """ True when the file holds the pixels of data. tifffile can drop an axis of size 1 when it reads """
+    """ Compare every pixel using one decoded YX plane at a time.
+
+    write_ome writes minisblack pages in C order from contiguous data ending in YX.
+    Singleton axes dropped from tifffile's series axes do not affect this order.
+    """
+    planes = data.reshape(-1, *data.shape[-2:])
     with tifffile.TiffFile(path) as tif:
-        back, back_axes = tif.series[0].asarray(), tif.series[0].axes
-    if back.dtype != data.dtype or not set(back_axes) <= set(axes):
-        return False
-    for ax in [a for a in axes if a not in back_axes]:
-        back, back_axes = back[np.newaxis], ax + back_axes
-    back = np.transpose(back, [back_axes.index(ax) for ax in axes])
-    return np.array_equal(back, data)
+        if len(tif.pages) != len(planes):
+            return False
+        for page, plane in zip(tif.pages, planes):
+            if page.dtype != data.dtype or page.shape != plane.shape:
+                return False
+            if not np.array_equal(page.asarray(), plane):
+                return False
+    return True
 
 
 def out_path(path, name, out_dir=None):
@@ -90,7 +96,7 @@ def _convert_one(info, tile, out, status=lambda text: None, metadata=None):
         settings["Tile scan"] = merged
     write_ome(part, data, axes, info.channels, info.pixel_size, info.z_step, metadata, settings,
               reader.read_xml(info.path, info.series), info.pixel_size_y, info.time_step, channel_colors=info.colors)
-    ## ponytail: the check holds the series twice in memory; compare plane by plane if a series outgrows the memory
+    ## ponytail: read every pixel back one YX plane at a time, without a second full-series array
     status("checking the pixels (step 3 of 3)")
     if not _same_pixels(part, data, axes):
         part.replace(out.with_name(out.name + ".BAD"))
